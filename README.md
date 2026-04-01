@@ -39,16 +39,18 @@ Orbbec Astra ──USB─┘         │
 ## Current Status
 
 - [x] Project scaffold
+- [x] Week 1: HFI-A9 IMU integrated, `/imu/data` publishing at ~295Hz
+- [x] Week 2: Dual motor + encoder verified, serial protocol (Pi ↔ Arduino) working
+- [ ] Week 3: ROS2 serial bridge node (in progress)
 - [ ] MVP0: Communication links verified (target: 2026-04-13)
 - [ ] MVP1: Balance PID running (target: 2026-05-11)
 - [ ] MVP2: Full system with obstacle avoidance (target: 2026-06-15)
 
 ## Next Steps
 
-1. Flash Ubuntu 22.04 to SD card, boot Raspberry Pi 5
-2. Install ROS2 Jazzy
-3. Connect HFI-A9 IMU, verify `/imu/data` topic
-4. Write `imu_reader` practice node
+1. Write ROS2 `serial_bridge` node — subscribe to `/cmd_vel`, send `M,pwm,pwm` to Arduino via USB serial
+2. Publish encoder data as `/wheel_odom` topic
+3. Verify end-to-end: `ros2 topic pub /cmd_vel` → motors respond
 
 ## Project Structure
 
