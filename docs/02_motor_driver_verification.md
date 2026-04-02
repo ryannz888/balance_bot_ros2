@@ -1,14 +1,14 @@
-# Week 2: Motor Driver & Encoder Verification
+# Stage 2: Motor Driver & Encoder Verification
 
 > Date: 2026-03-26 ~ 2026-04-01
 > Hardware: Raspberry Pi 5 + Arduino Mega 2560 + TB6612FNG + MG310P20 (Hall encoder)
 
 ## Result
 
-- Dual MG310P20 motors driving correctly via TB6612FNG ✅
-- Both encoders reading stably with consistent count rates ✅
-- Direction calibrated — right motor PWM inverted due to mirrored mounting ✅
-- Serial protocol verified: Pi Python script controls motors via USB serial ✅
+- Dual MG310P20 motors driving correctly via TB6612FNG
+- Both encoders reading stably with consistent count rates
+- Direction calibrated — right motor PWM inverted due to mirrored mounting
+- Serial protocol verified: Pi Python script controls motors via USB serial
 
 ---
 
