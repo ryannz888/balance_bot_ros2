@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  balance_bot mesh 版 URDF —— 基于 SW2URDF 1.6.0 导出结果修正：
+    1. 左右轮互换（导出时 left/right 命名反了，左轮应在 +Y）
+    2. right_wheel 惯量为 0 → 复用左轮数值（轮子对称）
+    3. joint 改名 *_joint，轮轴 axis 统一为 0 1 0（正转 = 前进）
+    4. mesh 路径包名 balance_bot → balance_bot_description
+    5. 补传感器 frame：imu_link / camera_link / camera_optical_frame
+
+  调试用简版（纯几何体）在 balance_bot.urdf，display.launch.py 里换文件名即可切换。
+-->
+<robot name="balance_bot">
+
+  <link name="base_link">
+    <inertial>
+      <!-- 2026-07-17 重导出更新：IMU移位后的质检属性 -->
+      <origin xyz="-0.0077169 0.0055384 0.10081" rpy="0 0 0" />
+      <mass value="0.84853" />
+      <inertia ixx="0.0018185" ixy="2.0008E-06" ixz="3.4067E-05"
+               iyy="0.0011604" iyz="2.6639E-05" izz="0.0014323" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://balance_bot_description/meshes/base_link.STL" />
+      </geometry>
+      <material name="body_white">
+        <color rgba="0.92 0.92 0.94 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://balance_bot_description/meshes/base_link.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <!-- ============ 左轮（+Y 侧） ============ -->
+  <link name="left_wheel">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.019376" />
+      <inertia ixx="4.194E-06" ixy="0" ixz="0"
+               iyy="7.2222E-06" iyz="0" izz="4.194E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://balance_bot_description/meshes/left_wheel.STL" />
+      </geometry>
+      <material name="wheel_dark">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://balance_bot_description/meshes/left_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="left_wheel_joint" type="continuous">
+    <origin xyz="0 0.0635 0" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="left_wheel" />
+    <axis xyz="0 1 0" />
+  </joint>
+
+  <!-- ============ 右轮（-Y 侧） ============ -->
+  <link name="right_wheel">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <mass value="0.019376" />
+      <inertia ixx="4.194E-06" ixy="0" ixz="0"
+               iyy="7.2222E-06" iyz="0" izz="4.194E-06" />
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://balance_bot_description/meshes/right_wheel.STL" />
+      </geometry>
+      <material name="wheel_dark">
+        <color rgba="0.25 0.25 0.28 1" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://balance_bot_description/meshes/right_wheel.STL" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="right_wheel_joint" type="continuous">
+    <origin xyz="0 -0.0635 0" rpy="0 0 0" />
+    <parent link="base_link" />
+    <child link="right_wheel" />
+    <axis xyz="0 1 0" />
+  </joint>
+
+  <!-- ============ IMU（frame 手写，几何已含在 base_link mesh 内） ============ -->
+  <link name="imu_link" />
+
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="imu_link" />
+    <!-- xyz 大致即可；rpy 必须按 HFI-A9 芯片丝印轴向填：
+         板上 X 指车头且 Z 朝上 → 0 0 0；其他安装方向要改 -->
+    <origin xyz="0 0 0.05" rpy="0 0 0" />
+  </joint>
+
+  <!-- ============ 深度相机 Orbbec Astra ============ -->
+  <link name="camera_link" />
+
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link" />
+    <child link="camera_link" />
+    <!-- SW实测：坐标系1原点 → Astra红外接收镜头中心 (2026-07-17)
+         y为镜头偏离车体中线的横向偏移；若镜头实际偏在车体右侧(-Y)，把y改负 -->
+    <origin xyz="0.022 0.0059 0.0594" rpy="0 0 0" />
+  </joint>
+
+  <!-- 光学坐标系（Z朝前/X朝右的图像约定），rpy 固定值永不修改 -->
+  <link name="camera_optical_frame" />
+
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="camera_link" />
+    <child link="camera_optical_frame" />
+    <origin xyz="0 0 0" rpy="-1.5708 0 -1.5708" />
+  </joint>
+
+</robot>

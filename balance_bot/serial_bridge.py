@@ -1,27 +1,46 @@
+import math
+import threading
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-import serial
-import threading
+from sensor_msgs.msg import JointState
 from geometry_msgs.msg import Twist
+import serial
+
 
 class SerialBridge(Node):
     def __init__(self):
         super().__init__('serial_bridge')
+        # 编码器一圈计数值：手转轮子整一圈看/wheel/encoders计数差来标定
+        self.declare_parameter('ticks_per_rev', 1320.0)
+        # 若手转轮子"向前滚"时计数变负，把对应invert设为True
+        self.declare_parameter('invert_left', False)
+        self.declare_parameter('invert_right', False)
+        self.ticks_per_rev = float(self.get_parameter('ticks_per_rev').value)
+        self.left_sign = -1.0 if self.get_parameter('invert_left').value else 1.0
+        self.right_sign = -1.0 if self.get_parameter('invert_right').value else 1.0
+
         self.enc_pub = self.create_publisher(String, '/wheel/encoders', 10)
-        self.ser = serial.Serial(port='/dev/ttyACM0', baudrate=115200, timeout=1.0)
+        self.joint_pub = self.create_publisher(JointState, '/joint_states', 10)
+        # by-id稳定路径：不受USB枚举顺序影响（ttyACM0/1漂移曾导致读到错误设备）
+        self.ser = serial.Serial(
+            port='/dev/serial/by-id/usb-Arduino_Srl_Arduino_Mega_85431303636351613122-if00',
+            baudrate=115200, timeout=1.0)
         self.create_subscription(Twist, '/cmd_vel', self._cb, 10)
         self.get_logger().info('serial_bridge started')
         self._read_thread = threading.Thread(target=self._read_serial, daemon=True)
         self._read_thread.start()
 
     def _cb(self, msg: Twist):
-    	linear  = msg.linear.x
-    	angular = msg.angular.z
-    	left_pwm  = int((linear - angular) * 100)
-    	right_pwm = int((linear + angular) * 100)
-    	cmd = f'M,{left_pwm},{right_pwm}\n'
-    	self.ser.write(cmd.encode())
+        linear = msg.linear.x
+        angular = msg.angular.z
+        left_pwm = int((linear - angular) * 100)
+        right_pwm = int((linear + angular) * 100)
+        # 实测(2026-07-19)：电机线束与编码器同样整组左右对调，且第一路对物理右轮极性相反
+        # 故协议映射为 field1=-右轮PWM, field2=+左轮PWM（i/j键实验鉴别，见docs/04）
+        cmd = f'M,{-right_pwm},{left_pwm}\n'
+        self.ser.write(cmd.encode())
 
     def _read_serial(self):
         while True:
@@ -31,12 +50,34 @@ class SerialBridge(Node):
             parts = line.split(',')
             if len(parts) != 3:
                 continue
+            # 实测(2026-07-19)：固件的"左/右"与URDF定义相反，在此对调归一
+            # 对调后 /wheel/encoders 和 /joint_states 的左右均为真实左右
+            parts[1], parts[2] = parts[2], parts[1]
             msg = String()
             msg.data = f'{parts[1]},{parts[2]}'
             self.enc_pub.publish(msg)
+
+            # 编码器计数 → 轮子转角(rad)，发布/joint_states驱动RViz模型轮子
+            # 降频到20Hz：100Hz的TF流会压垮WiFi热点链路，可靠传输排队导致RViz回放延迟
+            self._js_decim = getattr(self, '_js_decim', 0) + 1
+            if self._js_decim % 5:
+                continue
+            try:
+                l_count = int(parts[1])
+                r_count = int(parts[2])
+            except ValueError:
+                continue
+            js = JointState()
+            js.header.stamp = self.get_clock().now().to_msg()
+            js.name = ['left_wheel_joint', 'right_wheel_joint']
+            js.position = [
+                self.left_sign * 2.0 * math.pi * l_count / self.ticks_per_rev,
+                self.right_sign * 2.0 * math.pi * r_count / self.ticks_per_rev,
+            ]
+            self.joint_pub.publish(js)
+
 
 def main():
     rclpy.init()
     rclpy.spin(SerialBridge())
     rclpy.shutdown()
-

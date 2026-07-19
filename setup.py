@@ -29,6 +29,7 @@ setup(
         'console_scripts': [
 		'imu_reader = balance_bot.imu_reader:main',
 		'serial_bridge = balance_bot.serial_bridge:main',
+		'hfi_imu_node = balance_bot.hfi_imu_node:main',
         ],
     },
 )

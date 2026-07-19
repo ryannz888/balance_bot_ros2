@@ -1,0 +1,134 @@
+<?xml version="1.0"?>
+<!--
+  balance_bot URDF：两轮自平衡机器人的最小运动学模型
+  ================================================================
+  需要你用尺子量的 6 个数（单位全部是"米"，量出厘米后除以100）：
+
+  ① BODY_LENGTH  底盘长（前后方向） —— 下面默认 0.15
+  ② BODY_WIDTH   底盘宽（左右方向） —— 下面默认 0.20
+  ③ BODY_HEIGHT  底盘高（泡沫板叠起来的总高）—— 下面默认 0.25
+  ④ WHEEL_RADIUS 轮子半径（直径÷2，尽量量准）—— 下面默认 0.0325
+  ⑤ WHEEL_WIDTH  轮子厚度 —— 下面默认 0.025
+  ⑥ WHEEL_SEP/2  轮距的一半（两轮中心距÷2，尽量量准）—— 下面默认 0.11
+
+  坐标约定（ROS 标准 REP-103）：X 朝前，Y 朝左，Z 朝上
+  base_link 原点放在两轮轴心连线的中点，这样倾角就是 base_link 的 pitch
+-->
+<robot name="balance_bot">
+
+  <!-- ================= 底盘 ================= -->
+  <link name="base_link">
+    <visual>
+      <!-- 底盘几何中心相对轮轴的偏移：往上抬 半个身高 -->
+      <origin xyz="0 0 0.125" rpy="0 0 0"/>
+      <geometry>
+        <!-- ①长 ②宽 ③高 -->
+        <box size="0.15 0.20 0.25"/>
+      </geometry>
+      <material name="white">
+        <color rgba="0.9 0.9 0.9 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <!-- ================= 左轮 ================= -->
+  <link name="left_wheel">
+    <visual>
+      <!-- 圆柱默认沿Z轴，绕X转90°让它沿Y轴（轮轴方向） -->
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <!-- radius=④ length=⑤ -->
+        <cylinder radius="0.0325" length="0.025"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.15 0.15 0.15 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="left_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="left_wheel"/>
+    <!-- y = +轮距的一半 ⑥（左为正） -->
+    <origin xyz="0 0.11 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- ================= 右轮 ================= -->
+  <link name="right_wheel">
+    <visual>
+      <origin xyz="0 0 0" rpy="1.5708 0 0"/>
+      <geometry>
+        <!-- 和左轮保持一致 -->
+        <cylinder radius="0.0325" length="0.025"/>
+      </geometry>
+      <material name="black">
+        <color rgba="0.15 0.15 0.15 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="right_wheel_joint" type="continuous">
+    <parent link="base_link"/>
+    <child link="right_wheel"/>
+    <!-- y = -轮距的一半 ⑥（右为负） -->
+    <origin xyz="0 -0.11 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <!-- ================= IMU ================= -->
+  <link name="imu_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.03 0.03 0.01"/>
+      </geometry>
+      <material name="blue">
+        <color rgba="0.2 0.4 0.9 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="imu_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="imu_link"/>
+    <!-- IMU 相对轮轴中点的位置，大概量一下即可；默认放在底盘顶部 -->
+    <origin xyz="0 0 0.20" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ============ 深度相机 (Orbbec Astra) ============ -->
+  <link name="camera_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <!-- Astra 机身大致尺寸，不影响功能，只是视觉外观 -->
+        <box size="0.04 0.165 0.03"/>
+      </geometry>
+      <material name="gray">
+        <color rgba="0.4 0.4 0.4 1.0"/>
+      </material>
+    </visual>
+  </link>
+
+  <joint name="camera_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="camera_link"/>
+    <!-- ⑦ 相机镜头中心相对轮轴中点的位置：
+         x = 向前偏移量（相机在底盘前沿就是 底盘长/2 左右）
+         z = 离轮轴的高度
+         如果相机是俯视安装的，把 rpy 第二个数改成俯仰角（弧度，低头为正） -->
+    <origin xyz="0.08 0 0.22" rpy="0 0 0"/>
+  </joint>
+
+  <!-- 相机光学坐标系：图像/点云数据用的是"Z朝前、X朝右"的光学约定，
+       和 ROS 机体约定(X朝前)不同，所以固定加这个标准旋转，
+       MVP2 处理点云时直接用 camera_optical_frame 即可 -->
+  <link name="camera_optical_frame"/>
+
+  <joint name="camera_optical_joint" type="fixed">
+    <parent link="camera_link"/>
+    <child link="camera_optical_frame"/>
+    <origin xyz="0 0 0" rpy="-1.5708 0 -1.5708"/>
+  </joint>
+
+</robot>

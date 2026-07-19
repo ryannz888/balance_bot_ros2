@@ -13,7 +13,10 @@ class ImuReader(Node):
         y = msg.orientation.y
         z = msg.orientation.z
         w = msg.orientation.w
-        pitch = math.atan2(2*(w*x + y*z), 1 - 2*(x*x + y*y))
+        # 绕Y轴(轮轴)的前后倾角才是pitch；原公式算的是绕X轴的roll
+        sinp = 2*(w*y - z*x)
+        sinp = max(-1.0, min(1.0, sinp))
+        pitch = math.asin(sinp)
         self.get_logger().info(f'Pitch: {math.degrees(pitch):.2f} deg')
 
 def main():
