@@ -7,6 +7,7 @@ from sensor_msgs.msg import Imu, MagneticField
 import serial
 import struct
 import math
+import time
 
 
 def checkSum(list_data, check_data):
@@ -66,10 +67,13 @@ class HFIImuNode(Node):
         self.angularVelocity = [0.0, 0.0, 0.0]
         self.acceleration = [0.0, 0.0, 0.0]
         self.magnetometer = [0.0, 0.0, 0.0]
-        self.pub_flag = [True, True]
 
         try:
             self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=0.5)
+            # The CP2102-connected IMU starts streaming only after DTR/RTS are asserted.
+            self.ser.dtr = True
+            self.ser.rts = True
+            time.sleep(2.0)
             self.get_logger().info(f'Opened {port} at {baudrate} baud')
         except Exception as e:
             self.get_logger().error(f'Failed to open serial: {e}')
@@ -94,7 +98,7 @@ class HFIImuNode(Node):
 
         data_buff = list(self.buff.values())
 
-        if self.buff[2] == 0x2c and self.pub_flag[0]:
+        if self.buff[2] == 0x2c:
             if checkSum(data_buff[2:47], data_buff[47:49]):
                 data = hex_to_ieee(data_buff[7:47])
                 self.angularVelocity = data[1:4]
@@ -102,15 +106,22 @@ class HFIImuNode(Node):
                 self.magnetometer = data[7:10]
             else:
                 self.get_logger().warn('CRC fail: 0x2c')
-            self.pub_flag[0] = False
+            # This frame has no fresh attitude angle.  Publishing it would repeat
+            # the previous pitch with a new timestamp and create a false derivative
+            # spike in the balance controller.
+            self.buff = {}
+            self.key = 0
+            return
 
-        elif self.buff[2] == 0x14 and self.pub_flag[1]:
+        elif self.buff[2] == 0x14:
             if checkSum(data_buff[2:23], data_buff[23:25]):
                 data = hex_to_ieee(data_buff[7:23])
                 self.angle_degree = data[1:4]
             else:
                 self.get_logger().warn('CRC fail: 0x14')
-            self.pub_flag[1] = False
+                self.buff = {}
+                self.key = 0
+                return
 
         else:
             self.buff = {}
@@ -119,8 +130,8 @@ class HFIImuNode(Node):
 
         self.buff = {}
         self.key = 0
-        self.pub_flag[0] = self.pub_flag[1] = True
 
+        # Only a 0x14 frame reaches here, so every published orientation is new.
         now = self.get_clock().now().to_msg()
 
         # publish Imu

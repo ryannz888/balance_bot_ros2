@@ -205,3 +205,7 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Recorded rosbags: hundreds of MB of raw data, kept locally only.
+# Findings and metrics derived from them live in docs/.
+results/rosbag/

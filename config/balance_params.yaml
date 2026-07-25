@@ -1,0 +1,67 @@
+# Tuned 2026-07-25.  Sustains balance indefinitely: 228.7 s in one segment with
+# pitch error inside +/- 1 deg.  See docs/05_balance_achieved_2026-07-25.md for
+# how each value was derived and for the ones that must not be re-swept.
+balance_controller:
+  ros__parameters:
+    # Mechanical balance point.  Derived from the mean pitch of long engaged
+    # segments, not by trial and error.  Do not refine below ~0.2 deg; that is
+    # run-to-run noise.  Judge it by the velocity integral mean instead, which
+    # should sit near zero and never clamp.
+    pitch_offset_deg: 7.53
+    capture_offset_on_engage: false
+
+    # Angle inner loop.  Inherited and never needed retuning.
+    kp: 70.0
+    ki: 0.0
+    kd: 5.0
+    pitch_rate_filter_alpha: 0.3
+
+    # Outer loop.  Integrating wheel speed gives position, so ki_v is the
+    # position term and kp_v is its damping.  Both must be NEGATIVE: to slow a
+    # forward roll the wheels must first drive forward harder so the base moves
+    # ahead of the centre of mass and the body pitches back.
+    kp_v: -0.008
+    ki_v: -0.005
+    max_offset_trim_deg: 4.0
+    # Must be far slower than the angle loop.  At the 100 Hz encoder rate the
+    # old 0.3 put the outer loop cutoff near 4.8 Hz, faster than the inner loop.
+    velocity_filter_alpha: 0.06
+
+    # Direct wheel-speed braking is the wrong tool: it makes the body pitch
+    # further over and the angle loop immediately fights it.  Keep at 0.
+    kd_wheel: 0.0
+    max_wheel_damping_pwm: 0.0
+
+    # Yaw.  turn_velocity = left_v - right_v, and the bridge maps
+    # left = u - sync, right = u + sync, so this gain is positive.
+    wheel_sync_kp: 0.4
+    max_wheel_sync_pwm: 60.0
+    turn_velocity_filter_alpha: 0.15
+
+    # Engagement and safety.
+    engage_below_deg: 3.0
+    engage_rate_below_dps: 15.0
+    max_tilt_deg: 12.0
+    max_wheel_velocity: 600.0
+    # false lets the controller take over again once the body is set upright,
+    # so a test session needs no controller restarts.  Set true for unattended
+    # runs so one fall cannot lead to repeated re-engagement.
+    latch_on_fall: false
+
+    # Static-friction feed-forward stays off.  A common-mode assist frees one
+    # wheel before the other and shows up as yaw that wheel_sync_kp cannot
+    # correct.  Any future attempt must act per wheel, after the split.
+    deadband_pwm_fwd: 0.0
+    deadband_pwm_bwd: 0.0
+    deadband_err_deg: 1.0
+    deadband_ramp_deg: 0.0
+    deadband_output_ramp_pwm: 0.0
+    deadband_dither_hz: 0.0
+    deadband_velocity_threshold: 0.0
+
+    # Abrupt catch authority is not needed and was explicitly dropped.
+    recovery_pwm: 0.0
+
+    max_pwm: 255.0
+    motor_output_sign: 1.0
+    debug_control: false
