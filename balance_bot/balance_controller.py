@@ -111,6 +111,12 @@ class BalanceController(Node):
         # 位移，而操作者刚刚是有意离开那个点的。不清零车会一路爬回出发地
         # （T8实测全程净位移+0.01圈——它精确回到了原点，这不是遥控想要的）。
         self.declare_parameter('reset_integral_on_stop', True)
+        # 失速解锁。行驶时泄放积分会让trim停在够不到静摩擦突破电压的地方：
+        # 实测车前倾到trim +0.84度后车身照做、角度环误差只剩0.15度、输出塌缩到
+        # 14 PWM，而负载突破电压是65~80，于是车前倾着站在原地形成稳定死锁，
+        # 指令还在发也走不动。轮速低于该阈值且有速度指令时冻结泄放，
+        # 让积分继续累积把trim顶上去直到轮子挣脱。<=0 关闭。
+        self.declare_parameter('stall_velocity_ticks', 30.0)
         self.declare_parameter('angular_cmd_sign', 1.0)  # 实测方向不对时置-1
         self.declare_parameter('state_publish_decim', 3)  # /balance/state降频倍数
         self.declare_parameter('pitch_rate_filter_alpha', 0.3)  # pitch_rate低通滤波系数(0~1)，越小越平滑但越滞后
@@ -451,9 +457,15 @@ class BalanceController(Node):
             # 此刻积分已被泄放到很小(T8实测约+19，折合trim跳变0.1度)，无冲击。
             self.velocity_integral = 0.0
         self._station_keeping = station_keeping
+        # 失速：有速度指令但轮子基本没动 —— 死锁在静摩擦以下，见参数处注释。
+        stall_v = self.get_parameter('stall_velocity_ticks').value
+        stalled = (not station_keeping and stall_v > 0.0
+                   and abs(self.wheel_velocity) < stall_v)
         if 0.0 < dt < 0.05:
-            if station_keeping:
+            if station_keeping or stalled:
                 # ∫v dt 就是位置，ki_v 实际是位置比例项，负责把车锁在原地。
+                # 失速时同样正常累积：vel_err = 0 - v_ref 恒为满量程，
+                # trim 会稳定增长直到输出越过突破电压。
                 self.velocity_integral += vel_err * dt
             else:
                 # 行驶中若继续累积，加速滞后欠下的"距离"会在松手后被讨回来，

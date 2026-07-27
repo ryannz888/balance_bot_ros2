@@ -179,3 +179,28 @@ balance_controller:
     # the transition because the leak has already shrunk the integral (+19
     # measured, a 0.1 deg trim step).
     reset_integral_on_stop: true
+
+    # Stall unlock -- TRIED 2026-07-27 AND DISABLED.  Keep at 0.
+    #
+    # The stall it targets is real: while driving, the leak lets the trim settle
+    # where the angle loop is satisfied without moving (measured trim +0.84 deg
+    # with the body actually at that tilt, angle error down to 0.15 deg, output
+    # collapsed to 14 PWM against a 65-80 breakaway), so the robot stands there
+    # leaning, going nowhere, while still being commanded.
+    #
+    # This attempt let the integral keep accumulating while stalled so the trim
+    # would climb until the wheels broke free.  It does break free -- and then
+    # overshoots to 3.2x setpoint (+343 against +108.7) because the integral is
+    # still at -290 when motion resumes and only leaks with a 6 s constant.  The
+    # result is a diverging limit cycle: stall, wind up, break free, overshoot,
+    # stall again, with filtered wheel speed climbing past -1300 over successive
+    # cycles.  Measured, not predicted.
+    #
+    # The lesson is about picking the right actuator, not the right number: the
+    # integral is a seconds-scale state, and using it to punch through
+    # millisecond-scale static friction leaves that state stranded once the
+    # wheels move.  A fix has to act on the OUTPUT -- add just enough PWM to
+    # break free, drop it the instant the wheels turn, leave nothing behind.
+    # That is the deadband feed-forward already scaffolded above, which must be
+    # applied per wheel after the differential split (see the note there).
+    stall_velocity_ticks: 0.0
