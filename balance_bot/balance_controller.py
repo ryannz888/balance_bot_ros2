@@ -3,8 +3,16 @@ import math
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
-from std_msgs.msg import String
+from std_msgs.msg import String, Float32MultiArray, MultiArrayDimension
 from geometry_msgs.msg import Twist
+
+# Field order of /balance/state.  Recorded into the message layout label so a
+# bag stays readable without this source file.
+STATE_FIELDS = (
+    'pitch', 'err', 'rate', 'trim', 'offset', 'vel', 'vel_raw', 'turn',
+    'v_ref', 'turn_ref', 'vel_int', 'u', 'sync', 'engaged',
+    'bias', 'turn_int',
+)
 
 
 class BalanceController(Node):
@@ -15,6 +23,11 @@ class BalanceController(Node):
     内环在IMU回调里跑(~284Hz)；外环在编码器回调里算轮速，
     修正量叠加到pitch_offset_deg上，压制角度环兜不住的净漂移。
     参数可用 ros2 param set 在线调。
+
+    话题分层（2026-07-26遥控接入时确立）：
+      /cmd_vel     人的速度意图，SI单位(m/s, rad/s)，由teleop发布
+      /motor_cmd   本节点输出给serial_bridge的PWM指令(PWM/100)
+    遥控不新增回路：只是把速度环和偏航环的设定值从0换成指令值。
     """
 
     def __init__(self):
@@ -56,10 +69,50 @@ class BalanceController(Node):
         self.declare_parameter('max_wheel_damping_pwm', 0.0)  # <=0 leaves direct damping uncapped
         self.declare_parameter('max_wheel_damping_return_pwm', 0.0)  # Higher cap while body is returning upright
         self.declare_parameter('wheel_sync_kp', 0.0)  # PWM per left/right wheel-speed difference
+        # 纯P产生的差模修正可能整段都低于静摩擦突破电压，轮子挣不脱。
+        # 泄放积分会一直爬到挣脱为止，误差消失后自行衰减。
+        self.declare_parameter('wheel_sync_ki', 0.0)
+        self.declare_parameter('turn_integral_leak_s', 6.0)
+        self.declare_parameter('max_turn_integral', 2000.0)
         self.declare_parameter('max_wheel_sync_pwm', 0.0)  # <=0 leaves wheel synchronization uncapped
         self.declare_parameter('turn_velocity_filter_alpha', 0.15)
+        # IMU零偏随通电时间漂移(实测两小时0.86度，冷却后完全归零)。
+        # 站桩时速度环平均要顶住的trim，本身就等于零点误差，慢慢把它吸收掉。
+        # 时间常数必须远大于位置环，否则两个积分器会互相打架。0=关闭。
+        self.declare_parameter('offset_adapt_tau_s', 0.0)
+        self.declare_parameter('max_offset_bias_deg', 2.0)
         self.declare_parameter('max_offset_trim_deg', 5.0)  # 速度环能修正offset的最大幅度，防止跑飞
+        self.declare_parameter('max_velocity_integral', 500.0)  # 位置项抗饱和限幅(ticks)
         self.declare_parameter('velocity_filter_alpha', 0.3)  # 速度信号低通滤波系数(0~1)，越小越平滑但越滞后
+
+        # ---- 遥控 ----
+        # 输入是SI单位的速度意图，输出是给serial_bridge的PWM。两者必须分开，
+        # 否则teleop和本节点会抢同一个/cmd_vel互相覆盖。
+        self.declare_parameter('cmd_vel_topic', '/cmd_vel')
+        self.declare_parameter('motor_cmd_topic', '/motor_cmd')
+        # m/s ↔ ticks/s 换算。与serial_bridge的ticks_per_rev和URDF轮径保持一致，
+        # 改了机械参数这里也要跟着改。
+        self.declare_parameter('ticks_per_rev', 277.5)
+        self.declare_parameter('wheel_radius_m', 0.0325)
+        self.declare_parameter('wheel_separation_m', 0.22)
+        # 永远不要相信输入源：teleop_twist_keyboard默认0.5m/s，直接超过整车安全限。
+        self.declare_parameter('max_cmd_linear_mps', 0.25)
+        self.declare_parameter('max_cmd_angular_rps', 1.2)
+        # 断连/停发即回零，指令超时是遥控失效保护的唯一可靠位置。
+        self.declare_parameter('cmd_timeout_s', 0.5)
+        # 阶跃指令会把车掀翻：设定值必须斜坡上升，让角度环有时间把重心送出去。
+        self.declare_parameter('cmd_accel_ticks_s2', 250.0)
+        self.declare_parameter('cmd_yaw_accel_ticks_s2', 600.0)
+        # ki_v积分的是位置误差。行驶中继续累积会导致松手后倒车"补距离"，
+        # 故有指令时改为泄放；回到零指令后恢复累积，站桩性能不受影响。
+        self.declare_parameter('drive_integral_leak_s', 0.5)
+        self.declare_parameter('drive_deadzone_ticks', 20.0)
+        # 行驶结束回到站桩的瞬间清零位置积分：积分量代表相对"上一个保持点"的
+        # 位移，而操作者刚刚是有意离开那个点的。不清零车会一路爬回出发地
+        # （T8实测全程净位移+0.01圈——它精确回到了原点，这不是遥控想要的）。
+        self.declare_parameter('reset_integral_on_stop', True)
+        self.declare_parameter('angular_cmd_sign', 1.0)  # 实测方向不对时置-1
+        self.declare_parameter('state_publish_decim', 3)  # /balance/state降频倍数
         self.declare_parameter('pitch_rate_filter_alpha', 0.3)  # pitch_rate低通滤波系数(0~1)，越小越平滑但越滞后
         self.declare_parameter('pitch_rate_deadband_dps', 0.0)  # Ignore small IMU-rate noise around upright
         self.declare_parameter('debug_control', False)
@@ -88,14 +141,34 @@ class BalanceController(Node):
         self.turn_velocity_raw = 0.0
         self.turn_velocity = 0.0
         self.velocity_integral = 0.0
+        self.turn_integral = 0.0
+        self.offset_bias = 0.0
         self._last_enc = None
         self._last_enc_t = None
 
+        # 遥控设定值：_cmd_* 是收到的原始目标，*_ref 是斜坡后实际送进环里的
+        self._cmd_v_ticks = 0.0
+        self._cmd_turn_ticks = 0.0
+        self._last_cmd_t = None
+        self._cmd_stale = True
+        self.v_ref = 0.0
+        self.turn_ref = 0.0
+        self._ref_last_t = None
+        self._station_keeping = True
+        self._state_decim = 0
+
+        motor_topic = self.get_parameter('motor_cmd_topic').value
+        cmd_topic = self.get_parameter('cmd_vel_topic').value
         # Control commands must never queue behind stale PWM values.
-        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 1)
+        self.cmd_pub = self.create_publisher(Twist, motor_topic, 1)
+        self.state_pub = self.create_publisher(Float32MultiArray, '/balance/state', 10)
         self.create_subscription(Imu, '/imu/data', self._imu_cb, 10)
         self.create_subscription(String, '/wheel/encoders', self._enc_cb, 10)
-        self.get_logger().info('balance_controller started (disengaged, 扶正后自动接管)')
+        self.create_subscription(Twist, cmd_topic, self._cmd_cb, 1)
+        self.get_logger().info(
+            f'balance_controller started (disengaged, 扶正后自动接管) '
+            f'cmd_in={cmd_topic} motor_out={motor_topic} '
+            f'{self._ticks_per_meter():.1f} ticks/m')
 
     def _enc_cb(self, msg: String):
         try:
@@ -125,6 +198,99 @@ class BalanceController(Node):
                                       + (1.0 - turn_alpha) * self.turn_velocity)
         self._last_enc = (l, r)
         self._last_enc_t = t
+
+    def _ticks_per_meter(self):
+        ticks_per_rev = self.get_parameter('ticks_per_rev').value
+        radius = self.get_parameter('wheel_radius_m').value
+        return ticks_per_rev / (2.0 * math.pi * radius)
+
+    def _cmd_cb(self, msg: Twist):
+        """人的速度意图 → 外环设定值(ticks/s)。"""
+        max_lin = self.get_parameter('max_cmd_linear_mps').value
+        max_ang = self.get_parameter('max_cmd_angular_rps').value
+        lin = max(-max_lin, min(max_lin, msg.linear.x))
+        ang = max(-max_ang, min(max_ang, msg.angular.z))
+
+        ticks_per_meter = self._ticks_per_meter()
+        separation = self.get_parameter('wheel_separation_m').value
+        self._cmd_v_ticks = lin * ticks_per_meter
+        # turn_velocity = left_v - right_v，而REP-103里angular.z为正是左转(逆时针)，
+        # 左转时右轮更快，故差模设定值取负。
+        self._cmd_turn_ticks = (self.get_parameter('angular_cmd_sign').value
+                                * -ang * separation * ticks_per_meter)
+        self._last_cmd_t = self.get_clock().now().nanoseconds * 1e-9
+
+    @staticmethod
+    def _slew(current, target, max_step):
+        if max_step <= 0.0:
+            return target
+        delta = target - current
+        return current + max(-max_step, min(max_step, delta))
+
+    def _reset_command_refs(self):
+        """接管/切断时把设定值清零，避免沿用上一段残留的目标速度。"""
+        self.v_ref = 0.0
+        self.turn_ref = 0.0
+        self._cmd_v_ticks = 0.0
+        self._cmd_turn_ticks = 0.0
+        self._last_cmd_t = None
+
+    def _update_command_refs(self):
+        """把指令斜坡到设定值；超时则回零。
+
+        用自己的墙钟dt而不是控制环的dt：斜坡是真实时间量，不该跟IMU帧率绑定。
+        脱离接管时照常更新，这样车躺在地上也能验证整条指令链路
+        （输出在未接管分支里是硬零，不受影响）。
+        """
+        now = self.get_clock().now().nanoseconds * 1e-9
+        dt = 0.0 if self._ref_last_t is None else now - self._ref_last_t
+        self._ref_last_t = now
+        timeout = self.get_parameter('cmd_timeout_s').value
+        fresh = (self._last_cmd_t is not None
+                 and (now - self._last_cmd_t) <= timeout)
+        if fresh:
+            if self._cmd_stale:
+                self.get_logger().info('遥控指令接入')
+            self._cmd_stale = False
+            target_v, target_turn = self._cmd_v_ticks, self._cmd_turn_ticks
+        else:
+            # 指令断流：目标归零，车停在原地继续平衡而不是保持最后的速度冲出去。
+            if not self._cmd_stale:
+                self.get_logger().warn('遥控指令超时，设定值回零')
+            self._cmd_stale = True
+            target_v, target_turn = 0.0, 0.0
+
+        if not (0.0 < dt < 0.5):
+            return
+        self.v_ref = self._slew(
+            self.v_ref, target_v,
+            self.get_parameter('cmd_accel_ticks_s2').value * dt)
+        self.turn_ref = self._slew(
+            self.turn_ref, target_turn,
+            self.get_parameter('cmd_yaw_accel_ticks_s2').value * dt)
+
+    def _publish_state(self, pitch, err, trim, offset, u, sync):
+        """把控制器内部状态录进包里，省得离线再去重放状态机猜。"""
+        decim = max(1, int(self.get_parameter('state_publish_decim').value))
+        self._state_decim += 1
+        if self._state_decim % decim:
+            return
+        msg = Float32MultiArray()
+        dim = MultiArrayDimension()
+        dim.label = ','.join(STATE_FIELDS)
+        dim.size = len(STATE_FIELDS)
+        dim.stride = len(STATE_FIELDS)
+        msg.layout.dim = [dim]
+        msg.data = [
+            float(pitch), float(err), float(self.pitch_rate_filtered),
+            float(trim), float(offset), float(self.wheel_velocity),
+            float(self.wheel_velocity_raw), float(self.turn_velocity),
+            float(self.v_ref), float(self.turn_ref),
+            float(self.velocity_integral), float(u), float(sync),
+            1.0 if self.engaged else 0.0,
+            float(self.offset_bias), float(self.turn_integral),
+        ]
+        self.state_pub.publish(msg)
 
     def _imu_cb(self, msg: Imu):
         x, y, z, w = (msg.orientation.x, msg.orientation.y,
@@ -186,21 +352,35 @@ class BalanceController(Node):
         # D项由同一姿态定义的pitch差分得到，避免IMU安装轴与Euler轴不一致。
         self.pitch_rate_filtered = rate_alpha * pitch_rate + (1.0 - rate_alpha) * self.pitch_rate_filtered
 
-        # 安全判定用机械原始offset，不受速度环影响
+        # 安全判定用机械原始offset，不受速度环影响。
+        # offset_bias是慢速零点自适应的输出，用于抵消IMU温漂，不是控制量。
         effective_offset = (self.captured_offset
                             if capture_offset and self.captured_offset is not None
-                            else offset)
+                            else offset) + self.offset_bias
         raw_err = pitch - effective_offset
         # Wait for the serial bridge before capturing a balance point or engaging.
         cmd_link_ready = self.cmd_pub.get_subscription_count() > 0
 
+        # 设定值斜坡与接管状态无关，脱离时也跑，便于地面验证指令链路。
+        self._update_command_refs()
+
         # 状态机：摔倒切断 / 扶正接管
+        # 跑飞判据是"相对设定值"的超速：遥控行驶时轮速本就该不为零，
+        # 用绝对轮速判会在正常前进时误触发。
+        #
+        # 必须用滤波后的轮速，不能用raw：编码器277.5计数/圈、10ms窗口下
+        # 一个计数就是约100 ticks/s，raw信号逐帧在0和±300之间跳。
+        # 2026-07-26实测raw峰值687而滤波后仅356，三次"跑飞"保护里有两次
+        # 触发时滤波轮速只有51和72 ticks/s——车几乎是静止的，纯属误触发。
+        # 滤波时间常数 dt/alpha = 0.01/0.06 ≈ 0.17s，真跑飞仍能在0.3s内切断，
+        # 何况还有倾角保护兜底。
         if (self.engaged and max_wheel_velocity > 0.0
-                and abs(self.wheel_velocity_raw) > max_wheel_velocity):
+                and abs(self.wheel_velocity) > max_wheel_velocity + abs(self.v_ref)):
             self.engaged = False
             self.safety_latched = latch_on_fall
             self.integral = 0.0
             self.velocity_integral = 0.0
+            self._reset_command_refs()
             self.get_logger().warn(
                 f'wheel speed raw={self.wheel_velocity_raw:.1f} '
                 f'filtered={self.wheel_velocity:.1f} exceeds the safety limit; output disabled')
@@ -209,6 +389,7 @@ class BalanceController(Node):
             self.safety_latched = latch_on_fall
             self.integral = 0.0
             self.velocity_integral = 0.0
+            self._reset_command_refs()
             suffix = '，需重启控制器后才能再次接管' if self.safety_latched else ''
             self.get_logger().warn(f'倾角{pitch:.1f}°超限，输出切断{suffix}')
         elif not self.engaged and not self.safety_latched and cmd_link_ready:
@@ -232,6 +413,7 @@ class BalanceController(Node):
                         self.engaged = True
                         self.integral = 0.0
                         self.velocity_integral = 0.0
+                        self._reset_command_refs()
                         self.last_t = None
                         # A residual sample at the instant of capture must not start
                         # the wheels while the angle error is still zero.
@@ -242,24 +424,56 @@ class BalanceController(Node):
                 self.engaged = True
                 self.integral = 0.0
                 self.velocity_integral = 0.0
+                self._reset_command_refs()
                 self.last_t = None
                 self.pitch_rate_filtered = 0.0  # 避免沿用接管前残留角速度造成瞬间突变
                 self.get_logger().info('已接管平衡控制')
 
         if not self.engaged:
             self._send_pwm(0.0)
+            self._publish_state(pitch, raw_err, 0.0, effective_offset, 0.0, 0.0)
             return
 
         # dt由IMU消息时间戳求得
         dt = (t - self.last_t) if self.last_t is not None else 0.0
         self.last_t = t
 
-        # 速度外环：车持续朝一个方向溜走时，修正目标倾角把它拉回来
+        # 速度外环：车偏离设定速度时，修正目标倾角把它拉回来。
+        # 设定值为0就是原地站桩(整定时的工况)，非0就是跟随遥控指令——
+        # 同一套回路，只是设定值不同。
+        vel_err = self.wheel_velocity - self.v_ref
+        max_vel_integral = self.get_parameter('max_velocity_integral').value
+        drive_deadzone = self.get_parameter('drive_deadzone_ticks').value
+        station_keeping = abs(self.v_ref) < drive_deadzone
+        if (station_keeping and not self._station_keeping
+                and self.get_parameter('reset_integral_on_stop').value):
+            # 刚刚结束行驶：把当前位置定义为新的保持点。
+            # 此刻积分已被泄放到很小(T8实测约+19，折合trim跳变0.1度)，无冲击。
+            self.velocity_integral = 0.0
+        self._station_keeping = station_keeping
         if 0.0 < dt < 0.05:
-            self.velocity_integral += self.wheel_velocity * dt
-            self.velocity_integral = max(-500.0, min(500.0, self.velocity_integral))
-        offset_trim = kp_v * self.wheel_velocity + ki_v * self.velocity_integral
+            if station_keeping:
+                # ∫v dt 就是位置，ki_v 实际是位置比例项，负责把车锁在原地。
+                self.velocity_integral += vel_err * dt
+            else:
+                # 行驶中若继续累积，加速滞后欠下的"距离"会在松手后被讨回来，
+                # 表现为倒车找位置。泄放掉，只留kp_v做速度比例(允许少量速度垂度)。
+                leak = self.get_parameter('drive_integral_leak_s').value
+                self.velocity_integral *= (max(0.0, 1.0 - dt / leak)
+                                           if leak > 0.0 else 0.0)
+            self.velocity_integral = max(-max_vel_integral,
+                                         min(max_vel_integral, self.velocity_integral))
+        offset_trim = kp_v * vel_err + ki_v * self.velocity_integral
         offset_trim = max(-max_offset_trim, min(max_offset_trim, offset_trim))
+
+        # 零点慢速自适应：站桩且平均轮速为零时，速度环平均顶住的trim就是零点误差。
+        # 只在站桩时更新——行驶时trim非零是正当的(维持速度)，那不是零点误差。
+        # 闭环是 bias' = (真实平衡点 - 配置offset - bias)/tau，一阶稳定。
+        adapt_tau = self.get_parameter('offset_adapt_tau_s').value
+        if adapt_tau > 0.0 and station_keeping and 0.0 < dt < 0.05:
+            max_bias = self.get_parameter('max_offset_bias_deg').value
+            self.offset_bias += (offset_trim / adapt_tau) * dt
+            self.offset_bias = max(-max_bias, min(max_bias, self.offset_bias))
 
         err = pitch - (effective_offset + offset_trim)
 
@@ -283,7 +497,21 @@ class BalanceController(Node):
 
         # Equal and opposite side bias suppresses yaw without changing the
         # average forward/backward torque used by the balance loop.
-        sync_correction = wheel_sync_kp * self.turn_velocity
+        # 同理，设定值为0是走直线，非0就是按指令转向。
+        turn_err = self.turn_velocity - self.turn_ref
+        # 纯P时右转的修正量整段停在-34 PWM均值(峰值-59)，而负载突破电压是65~80,
+        # 轮子根本挣不脱静摩擦，实测右转只到设定值的28%。泄放积分会一路爬到
+        # 挣脱为止；误差消失后自行衰减，不会像纯积分那样锁死航向。
+        turn_leak = self.get_parameter('turn_integral_leak_s').value
+        max_turn_int = self.get_parameter('max_turn_integral').value
+        if 0.0 < dt < 0.05:
+            self.turn_integral += turn_err * dt
+            if turn_leak > 0.0:
+                self.turn_integral *= max(0.0, 1.0 - dt / turn_leak)
+            self.turn_integral = max(-max_turn_int,
+                                     min(max_turn_int, self.turn_integral))
+        sync_correction = (wheel_sync_kp * turn_err
+                           + self.get_parameter('wheel_sync_ki').value * self.turn_integral)
         if max_wheel_sync > 0.0:
             sync_correction = max(-max_wheel_sync,
                                   min(max_wheel_sync, sync_correction))
@@ -388,12 +616,15 @@ class BalanceController(Node):
                 self.get_logger().info(
                     f'ctrl pitch={pitch:.2f} err={err:.2f} '
                     f'rate={self.pitch_rate_filtered:.2f}/{rate_for_control:.2f} '
-                    f'vel={self.wheel_velocity:.1f} wheel_d={wheel_damping:.1f} '
+                    f'vel={self.wheel_velocity:.1f}/{self.v_ref:.1f} '
+                    f'wheel_d={wheel_damping:.1f} '
                     f'raw_vel={self.wheel_velocity_raw:.1f} '
                     f'L/R={self.left_wheel_velocity_raw:.1f}/{self.right_wheel_velocity_raw:.1f} '
-                    f'turn_v={self.turn_velocity_raw:.1f}/{self.turn_velocity:.1f} '
+                    f'turn_v={self.turn_velocity:.1f}/{self.turn_ref:.1f} '
+                    f'trim={offset_trim:.2f} vint={self.velocity_integral:.0f} '
                     f'sync={sync_correction:.1f} pwm={u:.1f}')
         self._send_pwm(u, sync_correction)
+        self._publish_state(pitch, err, offset_trim, effective_offset, u, sync_correction)
 
     def _send_pwm(self, u, sync_correction=0.0):
         # serial_bridge约定：left/right_pwm = (linear ∓ angular)*100

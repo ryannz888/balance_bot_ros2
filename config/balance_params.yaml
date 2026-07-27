@@ -10,11 +10,25 @@ balance_controller:
     pitch_offset_deg: 7.53
     capture_offset_on_engage: false
 
-    # Angle inner loop.  Inherited and never needed retuning.
+    # Angle inner loop.  kp/ki/kd inherited from the original tuning.
     kp: 70.0
     ki: 0.0
     kd: 5.0
-    pitch_rate_filter_alpha: 0.3
+    # 0.3 put the one-pole cutoff at 0.3*145/(2*pi) = 6.9 Hz.  Driving (unlike
+    # station keeping) breaks the wheels loose repeatedly, and that broadband
+    # kick rang the loop at 9.18 Hz with the output swinging 397 PWM peak to
+    # peak -- the judder visible when the robot moves.  Dropping to 0.15 moves
+    # the cutoff to 3.5 Hz: forward judder disappeared from the body motion
+    # (err went 9.18 Hz -> 0.46 Hz) and reverse err RMS fell 0.63 -> 0.45.
+    #
+    # The oscillation FREQUENCY moved with this filter (9.18 -> 7.07 Hz), which
+    # proves it is loop self-excitation, not a mechanical resonance -- a
+    # structural resonance cannot be shifted by a software coefficient.  So the
+    # remaining 7 Hz ring needs less loop gain there (lower kd), or better, the
+    # gyro's raw angular_velocity.y instead of a differentiated pitch, which
+    # would remove the differentiation noise that forces heavy filtering in the
+    # first place.  Not yet done -- see docs/07 section 11.
+    pitch_rate_filter_alpha: 0.15
 
     # Outer loop.  Integrating wheel speed gives position, so ki_v is the
     # position term and kp_v is its damping.  Both must be NEGATIVE: to slow a
@@ -23,6 +37,7 @@ balance_controller:
     kp_v: -0.008
     ki_v: -0.005
     max_offset_trim_deg: 4.0
+    max_velocity_integral: 500.0
     # Must be far slower than the angle loop.  At the 100 Hz encoder rate the
     # old 0.3 put the outer loop cutoff near 4.8 Hz, faster than the inner loop.
     velocity_filter_alpha: 0.06
@@ -35,8 +50,31 @@ balance_controller:
     # Yaw.  turn_velocity = left_v - right_v, and the bridge maps
     # left = u - sync, right = u + sync, so this gain is positive.
     wheel_sync_kp: 0.4
-    max_wheel_sync_pwm: 60.0
+    # Pure P could not turn the robot right: the correction sat at -34 PWM mean
+    # (-59 peak) for the whole command while the measured loaded breakaway is
+    # 65-80, so the wheels never broke free differentially and right turns
+    # reached only 28% of setpoint.  Left turns were fine because the machine
+    # already drifts left and needed just +8.  The cap was the binding
+    # constraint, not the gain, so it goes above breakaway; the leaky integral
+    # then climbs until the wheels release and decays once the error is gone,
+    # so it does not lock the heading the way a pure integrator would.
+    # Effective low-frequency gain = kp + ki*tau = 0.4 + 0.08*6 = 0.88.
+    wheel_sync_ki: 0.08
+    turn_integral_leak_s: 6.0
+    max_turn_integral: 2000.0
+    max_wheel_sync_pwm: 110.0
     turn_velocity_filter_alpha: 0.15
+
+    # IMU zero-bias drifts with time powered: 0.86 deg over two hours on
+    # 2026-07-26, and an overnight cool-down put it back to +0.002 deg of the
+    # configured value.  While station keeping with zero mean wheel speed, the
+    # trim the velocity loop holds on average IS the offset error, so absorb it.
+    # tau must stay far above the position loop (~3-6 s) or the two integrators
+    # fight; 120 s is ~20x slower and still 30x faster than the drift itself.
+    # 0 disables.  capture_offset_on_engage stays false: it would capture
+    # whatever angle the robot happens to be held at, not the balance point.
+    offset_adapt_tau_s: 120.0
+    max_offset_bias_deg: 2.0
 
     # Engagement and safety.
     engage_below_deg: 3.0
@@ -65,3 +103,71 @@ balance_controller:
     max_pwm: 255.0
     motor_output_sign: 1.0
     debug_control: false
+
+    # ---- Teleop (2026-07-26) ----
+    # Driving needs no new loop.  The velocity and yaw loops already regulate
+    # wheel speed and left/right difference; teleop only moves their setpoints
+    # off zero.  /cmd_vel is the SI-unit intent, /motor_cmd is the PWM output.
+    cmd_vel_topic: /cmd_vel
+    motor_cmd_topic: /motor_cmd
+
+    # Matches serial_bridge's ticks_per_rev and the URDF wheel geometry.
+    # 277.5 ticks/rev over a 0.2042 m circumference gives 1359 ticks/m, so the
+    # 600 ticks/s runaway limit corresponds to 0.44 m/s.
+    ticks_per_rev: 277.5
+    wheel_radius_m: 0.0325
+    wheel_separation_m: 0.22
+
+    # Clamp the input, never trust the source: teleop_twist_keyboard starts at
+    # 0.5 m/s, which is past what this machine can hold.
+    max_cmd_linear_mps: 0.25
+    max_cmd_angular_rps: 1.2
+
+    # Losing the teleop link must bring the setpoint to zero, not freeze the
+    # last command.  The robot then keeps balancing in place.
+    cmd_timeout_s: 0.5
+    # A step setpoint would demand an instant lean.  Ramp it so the angle loop
+    # has time to move the base out from under the centre of mass.
+    # 250 was still too abrupt: a reverse command issued while the robot happened
+    # to be rolling forward at +94 ticks/s made a 200 ticks/s error appear inside
+    # 0.4 s, the trim slammed to -1.17 deg, and the body overshot to -332 ticks/s
+    # against a -108.7 setpoint with the output saturated.  120 gives the outer
+    # loop about a second to bring the body along with the setpoint.
+    cmd_accel_ticks_s2: 120.0
+    cmd_yaw_accel_ticks_s2: 600.0
+
+    # ki_v integrates position error.  Keeping that up while driving means the
+    # distance lost to acceleration lag gets clawed back when the stick is
+    # released, i.e. the robot reverses to "find" its old position.  Leak it
+    # while driving instead; station keeping is unaffected.
+    #
+    # 0.5 s leaked so hard that the loop was effectively P-only while driving,
+    # and P alone cannot reject a steady disturbance.  Holding a reverse roll
+    # needs about +1.43 deg of standing forward lean, and the only way kp_v
+    # (-0.008) can produce that is to allow a 179 ticks/s error -- measured
+    # -266 against a -88 setpoint.  Forward needs ~0 deg of trim and so tracked
+    # at 104%.  A leaky integrator settles at I = tau * vel_err, giving an
+    # effective gain of kp_v + ki_v*tau = -0.008 + -0.005*3 = -0.023, about 3x
+    # stiffer, without the full position catch-up of an unleaked integral.
+    #
+    # 3.0 -> 6.0 after reset_integral_on_stop removed the reason to keep the
+    # leak short.  The two settings are complementary: a long leak buys tracking
+    # authority while driving, and the reset stops that authority from dragging
+    # the robot back to its old position afterwards.  Measured effect on the
+    # reverse command: -225.8 -> -71.3 against a -88 setpoint (257% overshoot to
+    # 81%), while peak output fell from a saturated 255 to 95.  Better tracking
+    # *and* less effort means the loop got the physics right, not that it is
+    # muscling through.
+    drive_integral_leak_s: 6.0
+    drive_deadzone_ticks: 20.0
+    angular_cmd_sign: 1.0
+
+    state_publish_decim: 3
+
+    # Ending a drive redefines the hold point as wherever the operator stopped.
+    # Without this the position loop integrates the displacement back to zero
+    # and the robot crawls to its starting spot: T8 measured net +0.01 rev over
+    # a whole run, i.e. it returned to the origin exactly.  Safe to switch at
+    # the transition because the leak has already shrunk the integral (+19
+    # measured, a 0.1 deg trim step).
+    reset_integral_on_stop: true

@@ -8,16 +8,47 @@
 工作流：
 
 ```bash
-# 1. Pi 上录包
-ros2 bag record -o myrun /imu/data /cmd_vel /wheel/encoders
+# 1. Pi 上录包（launch 自带，不用手敲话题清单）
+ros2 launch balance_bot balance.launch.py record:=true bag_name:=myrun
 
 # 2. 拉回本地
-scp -r pi:~/ros2_ws/bags/myrun results/rosbag/
+scp -r pi:~/ros2_ws/bags/myrun_<时间戳> results/rosbag/
 
 # 3. 分析
 cd tools
-python analyze_run.py ../results/rosbag/myrun 7.53 3.0 12.0 600 5.0
+python analyze_teleop.py ../results/rosbag/myrun_<时间戳>      # 有 /balance/state 时首选
+python analyze_run.py    ../results/rosbag/myrun_<时间戳> 7.53 3.0 12.0 600 5.0
 ```
+
+**停录制要用 `SIGTERM` 不是 `SIGINT`**：非交互 shell 里的后台任务会继承
+"忽略 SIGINT"，`kill -INT` 打不停 recorder，metadata.yaml 就不会写，
+包直接读不了。
+
+## analyze_teleop.py
+
+2026-07-26 起的首选工具。直接读 `/balance/state`，不再离线重放状态机。
+
+```
+参数：<bag路径>
+```
+
+输出：接管分段、每条遥控指令的**设定值跟随情况**（v_ref→vel、turn_ref→turn，
+同时给 ticks/s 和 m/s）、无指令时的站桩指标、以及全程位置漂移。
+指令块只统计后半段的均值，避开斜坡未到位的部分。
+
+## teleop_sequence.py
+
+发一段脚本化的速度指令序列到 `/cmd_vel`，用于可复现的阶跃测试。
+
+```
+参数：[线速度 m/s] [角速度 rad/s]      默认 0.08 / 0.5
+```
+
+**不要用 shell 循环套 `ros2 topic pub` 代替它。** 每次 `ros2 topic pub` 都是新进程，
+在 DDS 发现匹配上已有订阅者之前就开始发，VOLATILE 语义下这些消息对尚未被发现的
+订阅者直接丢弃。第一次遥控测试就栽在这：包里录到了 34 条前进指令，
+控制器的回调**一次都没触发**。本脚本全程只用一个 publisher，
+并且在 `get_subscription_count() > 0` 之前不发任何消息。
 
 ## analyze_run.py
 
