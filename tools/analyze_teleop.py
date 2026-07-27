@@ -100,6 +100,14 @@ def main():
     print('  each block reports the mean over its last half, once the ramp has settled')
     for s, e in command_blocks(t, col['v_ref'], col['turn_ref']):
         mid = (s + e) // 2
+        # A command issued while the motors are off looks exactly like perfect
+        # refusal to move: vel 0, trim 0.  Say so instead of reporting 0%.
+        engaged_frac = (col['engaged'][s:e] > 0.5).mean()
+        if engaged_frac < 0.9:
+            print(f'  {t[s]:7.1f}s +{t[e-1]-t[s]:4.1f}s  SKIPPED -- robot was '
+                  f'disengaged for {100*(1-engaged_frac):.0f}% of this block; '
+                  f'the zeros below would be motors-off, not tracking')
+            continue
         v_ref = col['v_ref'][mid:e].mean()
         vel = col['vel'][mid:e].mean()
         turn_ref = col['turn_ref'][mid:e].mean()

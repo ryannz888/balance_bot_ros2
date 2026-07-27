@@ -20,6 +20,12 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist
 
 RATE_HZ = 50.0
+# The robot has a ~0.45 Hz surge mode (2.2 s period).  A 3 s command averaged
+# over its second half is less than one full period, so the measured tracking
+# ratio depended on which phase of the surge it landed in -- it varied 4% to
+# 302% across runs with identical gains while every other metric stayed
+# repeatable.  Hold long enough to average several periods.
+HOLD_S = 12.0
 
 
 class Sequencer(Node):
@@ -70,7 +76,7 @@ def main():
     for linear, angular, label in ((lin, 0.0, 'forward'), (-lin, 0.0, 'reverse'),
                                    (0.0, ang, 'yaw left'), (0.0, -ang, 'yaw right')):
         node.get_logger().info(f'--- {label} ---')
-        node.hold(linear, angular, 3.0)
+        node.hold(linear, angular, HOLD_S)
         node.idle(6.0)
     node.get_logger().info('sequence done')
     rclpy.shutdown()

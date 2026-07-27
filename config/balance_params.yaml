@@ -10,10 +10,18 @@ balance_controller:
     pitch_offset_deg: 7.53
     capture_offset_on_engage: false
 
-    # Angle inner loop.  kp/ki/kd inherited from the original tuning.
+    # Angle inner loop.  kp/ki inherited from the original tuning.
     kp: 70.0
     ki: 0.0
-    kd: 5.0
+    # 5.0 -> 3.5 to stop the loop self-exciting while driving.  Filtering alone
+    # only moved the ring (see pitch_rate_filter_alpha below); killing it needs
+    # less loop gain at that frequency.  Measured back to back in one session:
+    # the forward command's body motion went from a 7.00 Hz ring with the output
+    # swinging 356 PWM peak to peak, to 0.44 Hz (the ordinary slow surge) at 127
+    # peak to peak.  Station keeping was unaffected -- errRMS 0.34-0.38 deg
+    # against 0.35 at kd 5.0, i.e. inside run-to-run noise -- so the damping
+    # given up was only ever feeding the oscillation.
+    kd: 3.5
     # 0.3 put the one-pole cutoff at 0.3*145/(2*pi) = 6.9 Hz.  Driving (unlike
     # station keeping) breaks the wheels loose repeatedly, and that broadband
     # kick rang the loop at 9.18 Hz with the output swinging 397 PWM peak to
