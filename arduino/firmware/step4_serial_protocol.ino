@@ -22,6 +22,8 @@ void setMotor(int in1, int in2, int en, int pwm) {
 }
 
 String cmdBuf = "";
+const unsigned long CMD_TIMEOUT_MS = 250;
+unsigned long lastCmd = 0;
 
 void setup() {
   pinMode(L_IN1, OUTPUT); pinMode(L_IN2, OUTPUT); pinMode(L_ENA, OUTPUT);
@@ -33,6 +35,9 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(L_ENC_A), lEncISR, RISING);
   attachInterrupt(digitalPinToInterrupt(R_ENC_A), rEncISR, RISING);
   Serial.begin(115200);
+  setMotor(L_IN1, L_IN2, L_ENA, 0);
+  setMotor(R_IN1, R_IN2, R_ENB, 0);
+  lastCmd = millis();
 }
 
 unsigned long lastSend = 0;
@@ -58,10 +63,17 @@ void loop() {
         int r_pwm = cmdBuf.substring(comma + 1).toInt();
         setMotor(L_IN1, L_IN2, L_ENA, l_pwm);
         setMotor(R_IN1, R_IN2, R_ENB, r_pwm);
+        lastCmd = millis();
       }
       cmdBuf = "";
     } else {
       cmdBuf += c;
     }
+  }
+
+  // A disconnected host must never leave the motors on at the last PWM.
+  if (millis() - lastCmd > CMD_TIMEOUT_MS) {
+    setMotor(L_IN1, L_IN2, L_ENA, 0);
+    setMotor(R_IN1, R_IN2, R_ENB, 0);
   }
 }

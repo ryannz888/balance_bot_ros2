@@ -1,0 +1,39 @@
+# Gamepad -> /cmd_vel mapping.
+#
+# Indices follow the SDL GameController layout that `game_controller_node`
+# normalizes to, so the same file works across brands (2.4G dongle pads, PS4,
+# Xbox).  Confirm against real hardware before trusting them:
+#     ros2 run joy game_controller_node
+#     ros2 topic echo /joy
+# and watch which entry moves.
+#
+#   axes    0 left-X   1 left-Y   2 right-X   3 right-Y   4 LT   5 RT
+#   buttons 0 A  1 B  2 X  3 Y  4 back  5 guide  6 start
+#           7 L-stick  8 R-stick  9 LB  10 RB
+#
+# Scales stay under the controller's own clamps (max_cmd_linear_mps 0.25,
+# max_cmd_angular_rps 1.2 in balance_params.yaml), which remain the real limit
+# no matter what this file says.
+teleop_twist_joy_node:
+  ros__parameters:
+    # SDL reports stick-up as -1.0, so the scale is negated to make pushing the
+    # stick forward a positive linear.x.
+    axis_linear:
+      x: 1
+    scale_linear:
+      x: -0.12
+    scale_linear_turbo:
+      x: -0.22
+
+    axis_angular:
+      yaw: 2
+    scale_angular:
+      yaw: 0.8
+
+    # Deadman switch.  Not optional on a balancing robot: releasing it must stop
+    # the machine, and it also guards against a stick knocked while idle.
+    # Releasing stops /cmd_vel, and the controller's cmd_timeout_s then ramps the
+    # setpoint to zero, leaving the robot balancing in place.
+    require_enable_button: true
+    enable_button: 9          # LB
+    enable_turbo_button: 10   # RB

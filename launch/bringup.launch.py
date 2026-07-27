@@ -2,6 +2,8 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
@@ -12,6 +14,10 @@ def generate_launch_description():
         robot_description = f.read()
 
     return LaunchDescription([
+        # 裸bringup时/cmd_vel直通电机，MVP0的键盘直驱用法不变。
+        # 平衡控制器接入时(见balance.launch.py)改为/motor_cmd，把/cmd_vel
+        # 让给人的速度意图，否则teleop和控制器会抢同一个话题。
+        DeclareLaunchArgument('motor_cmd_topic', default_value='/cmd_vel'),
         # IMU驱动（发布/imu/data）。注意imu_reader只是订阅端调试工具，不是驱动
         Node(
             package='balance_bot',
@@ -33,6 +39,7 @@ def generate_launch_description():
                 'invert_left': False,
                 'invert_right': True,
             }],
+            remappings=[('/cmd_vel', LaunchConfiguration('motor_cmd_topic'))],
         ),
         Node(
             package='robot_state_publisher',

@@ -12,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
 	(os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
+	(os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
         ('share/' + package_name, ['package.xml']),
     ],
     install_requires=['setuptools'],
@@ -30,6 +31,7 @@ setup(
 		'imu_reader = balance_bot.imu_reader:main',
 		'serial_bridge = balance_bot.serial_bridge:main',
 		'hfi_imu_node = balance_bot.hfi_imu_node:main',
+		'balance_controller = balance_bot.balance_controller:main',
         ],
     },
 )

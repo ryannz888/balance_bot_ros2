@@ -17,17 +17,30 @@ Two-wheeled self-balancing robot based on ROS2 Jazzy | Raspberry Pi 5 + Arduino 
 ## System Architecture
 
 ```text
-HFI-A9 IMU ──USB──► hfi_imu_node ──► /imu/data (sensor_msgs/Imu, ~285Hz)
-
-/cmd_vel ──► serial_bridge ──"M,<pwm>,<pwm>"──► Arduino Mega ──► TB6612 ──► motors
-                  ▲                                  │
-                  └────"E,<left>,<right>" (100Hz)────┘  encoder counts
-                  │
-                  ├──► /wheel/encoders (raw counts, left/right normalized)
-                  └──► /joint_states (wheel angles, 20Hz) ──► robot_state_publisher ──► /tf
+HFI-A9 IMU ──USB──► hfi_imu_node ──► /imu/data (sensor_msgs/Imu, ~145Hz)
+                                          │
+teleop ──/cmd_vel──► balance_controller ◄─┘
+       (SI units,           │  └──► /balance/state (controller's own view, 48Hz)
+        human intent)       │
+                    /motor_cmd (PWM/100)
+                            ▼
+                      serial_bridge ──"M,<pwm>,<pwm>"──► Arduino Mega ──► TB6612 ──► motors
+                            ▲                                  │
+                            └────"E,<left>,<right>" (100Hz)────┘  encoder counts
+                            │
+                            ├──► /wheel/encoders (raw counts, left/right normalized)
+                            └──► /joint_states (wheel angles, 20Hz) ──► robot_state_publisher ──► /tf
 
 URDF (SolidWorks-exported meshes + hand-written sensor frames) ──► /robot_description
 ```
+
+`/cmd_vel` carries **velocity intent in SI units**; `/motor_cmd` carries the PWM
+setpoint.  Splitting them is what lets teleop and the balance controller coexist —
+before, both wrote `/cmd_vel` and overwrote each other.  `bringup.launch.py` still
+defaults `serial_bridge` to `/cmd_vel`, so MVP0 keyboard-direct driving is unchanged.
+
+Driving adds no new control loop: the velocity and yaw loops already regulate wheel
+speed and left/right difference to **zero**, so teleop just moves those setpoints.
 
 Frame convention: REP-103 (X forward, Y left, Z up). `base_link` origin at wheel-axle midpoint.
 Tilt convention for balance control: **forward tilt = positive pitch**.
@@ -39,8 +52,26 @@ Tilt convention for balance control: **forward tilt = positive pitch**.
 - [x] Week 3: `serial_bridge` node — `/cmd_vel` → PWM downlink, encoder uplink
 - [x] Week 4: URDF (SW2URDF export + fixes), RViz visualization, TF tree with sensor frames
 - [x] **MVP0 (2026-07-19): keyboard teleop + encoder-driven RViz live sync** ✅
-- [ ] MVP1: Balance PID (pitch from IMU → wheel PWM), target: 2026-08
+- [x] **MVP1a (2026-07-25): balance PID — four-stage cascade, 228s continuous** ✅
+- [x] **MVP1b (2026-07-27): driving under balance + integrated rosbag recording** ✅
+      — 361s continuous balance, drive/reverse/yaw commands tracked, one-command capture
 - [ ] MVP2: Depth-camera obstacle avoidance + state machine (stretch goal)
+
+## Running it
+
+```bash
+ros2 launch balance_bot balance.launch.py                          # balance only
+ros2 launch balance_bot balance.launch.py record:=true bag_name:=run1   # + rosbag
+ros2 run teleop_twist_keyboard teleop_twist_keyboard               # drive it
+ros2 launch balance_bot teleop_joy.launch.py                       # or a gamepad
+```
+
+Set the robot upright and let go; it engages itself.  Analysis of a recorded run:
+
+```bash
+scp -r pi:~/ros2_ws/bags/run1_<stamp> results/rosbag/
+python tools/analyze_teleop.py results/rosbag/run1_<stamp>
+```
 
 ## Quick Start (on the robot)
 
