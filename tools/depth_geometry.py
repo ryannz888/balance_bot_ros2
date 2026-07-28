@@ -24,6 +24,36 @@ import sys
 
 import numpy as np
 
+def quat_inverse(x, y, z, w):
+    return -x, -y, -z, w
+
+
+def quat_multiply(a, b):
+    ax, ay, az, aw = a
+    bx, by, bz, bw = b
+    return (
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+        aw * bw - ax * bx - ay * by - az * bz,
+    )
+
+
+def yaw_of(x, y, z, w):
+    return math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def rotate_arrays(q, vx, vy, vz):
+    """Rotate whole arrays of vectors by quaternion q (xyzw)."""
+    qx, qy, qz, qw = q
+    tx = 2.0 * (qy * vz - qz * vy)
+    ty = 2.0 * (qz * vx - qx * vz)
+    tz = 2.0 * (qx * vy - qy * vx)
+    return (vx + qw * tx + (qy * tz - qz * ty),
+            vy + qw * ty + (qz * tx - qx * tz),
+            vz + qw * tz + (qx * ty - qy * tx))
+
+
 FX = FY = 570.3422241210938
 CX, CY = 319.5, 239.5
 
@@ -64,28 +94,19 @@ def main():
     up = up + CAM_XYZ[2]
 
     # base_link -> gravity aligned, using the attitude recorded with the frame.
-    qx, qy, qz, qw = att['quat_xyzw']
-    yaw = math.atan2(2.0 * (qw * qz + qx * qy), 1.0 - 2.0 * (qy * qy + qz * qz))
-    ch, sh = math.cos(0.5 * yaw), math.sin(0.5 * yaw)
-    # q_rel = inv(q) * q_yaw_only, matching level_frame_publisher.
-    ix, iy, iz, iw = -qx, -qy, -qz, qw
-    rx = iw * 0.0 + ix * ch + iy * sh - iz * 0.0
-    ry = iw * 0.0 - ix * 0.0 + iy * ch + iz * sh
-    rz = iw * sh + ix * 0.0 - iy * 0.0 + iz * ch
-    rw = iw * ch - ix * 0.0 - iy * 0.0 - iz * sh
-    # Rotate (fwd, left, up) by the inverse of q_rel into the level frame.
-    n = math.sqrt(rx * rx + ry * ry + rz * rz + rw * rw)
-    rx, ry, rz, rw = rx / n, ry / n, rz / n, rw / n
-    cx_, cy_, cz_, cw_ = -rx, -ry, -rz, rw   # inverse
-    # v' = q v q^-1 expanded for a real vector
-    def rot(vx, vy, vz):
-        tx = 2.0 * (cy_ * vz - cz_ * vy)
-        ty = 2.0 * (cz_ * vx - cx_ * vz)
-        tz = 2.0 * (cx_ * vy - cy_ * vx)
-        return (vx + cw_ * tx + (cy_ * tz - cz_ * ty),
-                vy + cw_ * ty + (cz_ * tx - cx_ * tz),
-                vz + cw_ * tz + (cx_ * ty - cy_ * tx))
-    fwd, left, up = rot(fwd, left, up)
+    #
+    # Written with helpers rather than expanded by hand.  The first version
+    # inlined the multiplication against a yaw-only quaternion, dropped the
+    # sin term onto the wrong component of y, and produced a transform that
+    # happened to look right on a frame taken at -82 deg -- every point there
+    # landed in the same bucket, so the error was invisible.  Upright, it put
+    # 100% of points below the floor.
+    q_body = tuple(att['quat_xyzw'])
+    yaw = yaw_of(*q_body)
+    half = 0.5 * yaw
+    q_world_level = (0.0, 0.0, math.sin(half), math.cos(half))
+    q_rel = quat_multiply(quat_inverse(*q_body), q_world_level)
+    fwd, left, up = rotate_arrays(quat_inverse(*q_rel), fwd, left, up)
     height = up + WHEEL_RADIUS
 
     cam_h = CAM_XYZ[2] + WHEEL_RADIUS
