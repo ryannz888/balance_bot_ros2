@@ -28,6 +28,11 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('device_id', default_value='0',
                               description='Joystick index, /dev/input/js<N>'),
+        # Publish to /cmd_vel_raw when the obstacle guard is running, so it can
+        # limit forward motion.  Writing straight to /cmd_vel bypasses the
+        # guard: the topic name is what enforces it.
+        DeclareLaunchArgument('cmd_topic', default_value='/cmd_vel',
+                              description='/cmd_vel_raw when avoid.launch.py is up'),
         Node(
             package='joy',
             executable='game_controller_node',
@@ -46,5 +51,6 @@ def generate_launch_description():
             executable='teleop_node',
             name='teleop_twist_joy_node',
             parameters=[params],
+            remappings=[('/cmd_vel', LaunchConfiguration('cmd_topic'))],
         ),
     ])

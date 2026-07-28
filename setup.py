@@ -34,6 +34,7 @@ setup(
 		'balance_controller = balance_bot.balance_controller:main',
 		'level_frame_publisher = balance_bot.level_frame_publisher:main',
 		'obstacle_scan = balance_bot.obstacle_scan:main',
+		'avoidance_guard = balance_bot.avoidance_guard:main',
         ],
     },
 )
