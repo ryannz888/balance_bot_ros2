@@ -32,6 +32,7 @@ setup(
 		'serial_bridge = balance_bot.serial_bridge:main',
 		'hfi_imu_node = balance_bot.hfi_imu_node:main',
 		'balance_controller = balance_bot.balance_controller:main',
+		'level_frame_publisher = balance_bot.level_frame_publisher:main',
         ],
     },
 )
