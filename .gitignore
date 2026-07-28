@@ -209,3 +209,7 @@ __marimo__/
 # Recorded rosbags: hundreds of MB of raw data, kept locally only.
 # Findings and metrics derived from them live in docs/.
 results/rosbag/
+
+# Raw depth arrays: 1.2 MB each, regenerable with tools/grab_depth.py.
+# The PNG previews and .json attitude sidecars are small and worth keeping.
+results/depth/*.npy
