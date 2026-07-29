@@ -61,6 +61,12 @@ class Explorer(Node):
         self.declare_parameter('gap_lookahead_m', 1.20)
         # How hard to steer toward the chosen gap while still moving.
         self.declare_parameter('gap_steer_gain', 1.2)
+        # The gap answer jumps frame to frame, because 44% of bearings are
+        # unknown and each one flickers between passable and not.  Measured
+        # unfiltered: +18, +13, +2, -14, +16, +0 deg inside 0.6 s, which the
+        # steering followed directly and drove the balance loop to saturation.
+        # Commit to a bearing and only move off it gradually.
+        self.declare_parameter('gap_smooth_alpha', 0.25)
 
         # Turning forever means the way out is not visible from here.
         self.declare_parameter('turn_timeout_s', 6.0)
@@ -72,7 +78,8 @@ class Explorer(Node):
         self.turn_sign = 1.0
         self.nearest = float('nan')
         self.left_clear = self.right_clear = float('nan')
-        self.gap_bearing = None
+        self.gap_bearing = None       # smoothed, what steering follows
+        self.gap_raw = None           # this frame's answer
         self.gap_width = 0.0
         self.have_scan = False
         self.last_logged = None
@@ -133,7 +140,15 @@ class Explorer(Node):
         self.nearest = nearest
         self.left_clear = left_min if left_n else float('nan')
         self.right_clear = right_min if right_n else float('nan')
-        self.gap_bearing, self.gap_width = self._widest_gap(passable, look, need)
+        raw, self.gap_width = self._widest_gap(passable, look, need)
+        self.gap_raw = raw
+        if raw is None:
+            self.gap_bearing = None
+        elif self.gap_bearing is None:
+            self.gap_bearing = raw
+        else:
+            a = self.get_parameter('gap_smooth_alpha').value
+            self.gap_bearing += a * (raw - self.gap_bearing)
 
     @staticmethod
     def _widest_gap(passable, look, need):
@@ -189,7 +204,12 @@ class Explorer(Node):
         hold = self.get_parameter('resume_hold_s').value
 
         if self.state == DRIVE:
-            if self.nearest < trigger:
+            # No passable gap is itself the reason to turn.  Waiting for the
+            # distance threshold instead let the robot crawl straight at a
+            # table leg for three seconds with gap=none the whole time: the
+            # guard had already tapered speed to 4.5 cm/s by 0.87 m, while the
+            # turn trigger sat at 0.85 m and never fired.
+            if self.gap_bearing is None or self.nearest < trigger:
                 lc = self.left_clear if self.left_clear == self.left_clear else -1.0
                 rc = self.right_clear if self.right_clear == self.right_clear else -1.0
                 self.turn_sign = 1.0 if lc >= rc else -1.0
@@ -211,7 +231,11 @@ class Explorer(Node):
             if self.gap_bearing is not None:
                 self.turn_sign = 1.0 if self.gap_bearing > 0.0 else -1.0
             cmd.angular.z = self.turn_sign * self.get_parameter('turn_rate_rps').value
-            if self.nearest >= resume or self.gap_bearing is not None:
+            # A gap coming into view is reason to resume, but not while
+            # something is still close: the gap may be beyond the obstacle.
+            # Distance and passability both have to agree.
+            gap_ok = self.gap_bearing is not None and self.nearest >= trigger
+            if self.nearest >= resume or gap_ok:
                 if self.clear_since is None:
                     self.clear_since = now
                 elif now - self.clear_since >= hold:

@@ -57,6 +57,13 @@ class AvoidanceGuard(Node):
         # not evidence of anything.
         self.declare_parameter('min_known_bearings', 4)
         self.declare_parameter('blind_speed_scale', 0.35)
+        # Tapering toward zero commands speeds the drivetrain cannot deliver.
+        # Below roughly this, static friction wins and the wheels do not turn
+        # at all -- the robot leans into the obstacle and the balance loop
+        # fights itself.  Measured: 0.045 m/s commanded for three seconds with
+        # the range reading 0.86 -> 0.88 m, i.e. not moving, ending in a fall
+        # against a table leg.  Taper down to this floor, then to zero at STOP.
+        self.declare_parameter('min_move_speed_mps', 0.07)
         self.declare_parameter('scan_timeout_s', 0.5)
 
         self.state = BLIND
@@ -164,7 +171,15 @@ class AvoidanceGuard(Node):
             # faces forward and has nothing to say about it either way.
             out.linear.x = msg.linear.x
         else:
-            out.linear.x = msg.linear.x * self._scale_for(state)
+            want = msg.linear.x * self._scale_for(state)
+            floor = self.get_parameter('min_move_speed_mps').value
+            # Anything between zero and the floor is a speed this drivetrain
+            # will not actually produce; asking for it stalls the wheels while
+            # the body keeps leaning.  Round it to something that moves, or to
+            # a genuine stop.
+            if 0.0 < want < floor:
+                want = floor if want >= 0.5 * floor else 0.0
+            out.linear.x = min(want, msg.linear.x)
         self.pub.publish(out)
 
     def _publish_state(self):
