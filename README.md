@@ -3,7 +3,8 @@
 Two-wheeled self-balancing robot. Raspberry Pi 5 + Arduino Mega + IMU + depth camera, ROS 2 Jazzy.
 
 Stands on its own indefinitely, drives under gamepad or keyboard control while balancing,
-and stops itself when the depth camera sees something in the way.
+stops itself when the depth camera sees something in the way, and will drive around
+a room on its own, turning away from whatever it finds.
 
 | | measured |
 | --- | --- |
@@ -12,6 +13,7 @@ and stops itself when the depth camera sees something in the way.
 | Pitch error, station keeping | **0.34 deg RMS**, inside ±1.3 deg |
 | Braking distance | **0.10 m** from 0.174 m/s |
 | Obstacle scan | 1.98 m baseline with 0.01 m scatter; detects at 0.53–0.71 m |
+| Autonomous | **486.9 s** of unbroken balance while driving, turning and reversing on its own |
 
 ## What was actually hard
 
@@ -154,6 +156,11 @@ earlier for tuning, because every teleop command is followed by a release.
 - [x] **MVP1** — balance PID (four-stage cascade), driving under balance, gamepad, recording and analysis
 - [x] **MVP2** — depth perception, gravity-aligned obstacle scan, avoidance guard, autonomous wandering
 - [ ] Odometry (encoders on a pitching body do not measure ground distance directly), then SLAM
+
+Autonomy's limit is the sensor, not the logic: with a 58° horizontal field of view the
+robot cannot see where it is about to turn until it has turned, so escaping an enclosed
+space is search rather than planning. A wider sensor, or remembering what was seen a
+moment ago, is the next real improvement.
 
 Known open items are recorded with reproduction steps rather than omitted — the most
 significant is that driving forward can lock up below the static-friction threshold, and why
