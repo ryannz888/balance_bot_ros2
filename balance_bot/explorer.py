@@ -33,7 +33,7 @@ from geometry_msgs.msg import Twist
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-DRIVE, TURN, BACKUP = 'DRIVE', 'TURN', 'BACKUP'
+DRIVE, TURN, COMMIT, BACKUP = 'DRIVE', 'TURN', 'COMMIT', 'BACKUP'
 
 
 class Explorer(Node):
@@ -53,11 +53,17 @@ class Explorer(Node):
         # The strip the robot occupies, in metres.  Not an angle: an angular
         # corridor is 0.62 m wide at 1 m and 1.86 m at 3 m against a 0.22 m
         # track, so distant things well off to the side read as obstacles.
-        self.declare_parameter('corridor_half_width_m', 0.18)
+        # Half-width of the strip the robot claims.  0.18 left only 70 mm of
+        # clearance either side of the 220 mm track and the robot clipped
+        # edges; 0.22 gives 110 mm.  Widening this makes the robot treat more
+        # things as in the way, which is the correct direction for clipping.
+        self.declare_parameter('corridor_half_width_m', 0.22)
         self.declare_parameter('min_known_bearings', 4)
 
         # A gap must fit the robot with clearance to be worth aiming at.
-        self.declare_parameter('gap_min_width_m', 0.36)
+        # Must exceed twice the corridor half-width, or the robot would aim
+        # at gaps it does not fit through.
+        self.declare_parameter('gap_min_width_m', 0.46)
         self.declare_parameter('gap_lookahead_m', 1.20)
         # How hard to steer toward the chosen gap while still moving.
         self.declare_parameter('gap_steer_gain', 1.2)
@@ -68,9 +74,15 @@ class Explorer(Node):
         # Commit to a bearing and only move off it gradually.
         self.declare_parameter('gap_smooth_alpha', 0.25)
 
-        # Turning forever means the way out is not visible from here.
-        self.declare_parameter('turn_timeout_s', 6.0)
-        self.declare_parameter('backup_duration_s', 1.5)
+        # Sweeping until some direction clears a threshold does not terminate
+        # in a tight space, because no direction clears it -- the robot swept
+        # 206 deg, backed up 12 cm, and swept again.  Instead sweep a fixed arc
+        # while remembering which heading was most open, then commit to that
+        # heading.  Picking the best of what was seen always terminates;
+        # waiting for something good enough does not.
+        self.declare_parameter('sweep_arc_rad', 3.6)      # a bit over half a turn
+        self.declare_parameter('commit_tolerance_rad', 0.15)
+        self.declare_parameter('backup_duration_s', 2.5)
 
         self.state = TURN            # look before moving
         self.state_since = None
@@ -81,12 +93,19 @@ class Explorer(Node):
         self.gap_bearing = None       # smoothed, what steering follows
         self.gap_raw = None           # this frame's answer
         self.gap_width = 0.0
+        self.yaw = None               # absolute heading, for measuring a sweep
+        self.sweep_start_yaw = None
+        self.sweep_turned = 0.0
+        self.best_clear = -1.0        # best openness seen during this sweep
+        self.best_yaw = None
         self.have_scan = False
         self.last_logged = None
 
         self.pub = self.create_publisher(Twist, '/cmd_vel_raw', 1)
         self.state_pub = self.create_publisher(String, '/explorer/state', 5)
         self.create_subscription(LaserScan, '/obstacle/scan', self._scan_cb, 5)
+        from sensor_msgs.msg import Imu
+        self.create_subscription(Imu, '/imu/data', self._imu_cb, 10)
         self.create_timer(0.1, self._tick)
         self.get_logger().info(
             'explorer ready, disabled -- enable with: '
@@ -173,8 +192,19 @@ class Explorer(Node):
                 start = None
         return (best_mid, best_w) if best_w >= need else (None, best_w)
 
+    def _imu_cb(self, msg):
+        q = msg.orientation
+        self.yaw = math.atan2(2.0 * (q.w * q.z + q.x * q.y),
+                              1.0 - 2.0 * (q.y * q.y + q.z * q.z))
+
+    @staticmethod
+    def _wrap(a):
+        return (a + math.pi) % (2.0 * math.pi) - math.pi
+
     def _enter(self, state):
         if state != self.state:
+            if state != TURN:
+                self.sweep_start_yaw = None      # a new sweep starts fresh
             self.state = state
             self.state_since = self._now()
             self.clear_since = None
@@ -226,26 +256,52 @@ class Explorer(Node):
                     cmd.angular.z = max(-rate, min(rate, gain * self.gap_bearing))
 
         elif self.state == TURN:
-            # If a gap has come into view, turn toward it rather than
-            # continuing to sweep blindly in the chosen direction.
             if self.gap_bearing is not None:
                 self.turn_sign = 1.0 if self.gap_bearing > 0.0 else -1.0
             cmd.angular.z = self.turn_sign * self.get_parameter('turn_rate_rps').value
-            # A gap coming into view is reason to resume, but not while
-            # something is still close: the gap may be beyond the obstacle.
-            # Distance and passability both have to agree.
+
+            # Track how far this sweep has gone, and which heading looked most
+            # open along the way.  Openness is the corridor distance, so it
+            # answers the same question driving will ask.
+            if self.yaw is not None:
+                if self.sweep_start_yaw is None:
+                    self.sweep_start_yaw = self.yaw
+                    self.sweep_turned = 0.0
+                    self.best_clear, self.best_yaw = -1.0, self.yaw
+                    self._last_yaw = self.yaw
+                else:
+                    self.sweep_turned += abs(self._wrap(self.yaw - self._last_yaw))
+                    self._last_yaw = self.yaw
+                score = self.nearest if math.isfinite(self.nearest) else 99.0
+                if score > self.best_clear:
+                    self.best_clear, self.best_yaw = score, self.yaw
+
             gap_ok = self.gap_bearing is not None and self.nearest >= trigger
             if self.nearest >= resume or gap_ok:
-                if self.clear_since is None:
-                    self.clear_since = now
-                elif now - self.clear_since >= hold:
-                    self._enter(DRIVE)
+                self._enter(DRIVE)
+            elif (self.yaw is not None
+                  and self.sweep_turned >= self.get_parameter('sweep_arc_rad').value):
+                # A full sweep found nothing above threshold.  Rather than
+                # sweeping again, go to the best heading it did see.
+                self._enter(COMMIT)
+            elif self.yaw is None and (
+                    now - self.state_since > 6.0):
+                self._enter(BACKUP)      # no heading available, fall back
+
+        elif self.state == COMMIT:
+            # Rotate onto the most open heading found during the sweep, then
+            # drive whatever it turned out to be.  The guard still limits it.
+            if self.yaw is None or self.best_yaw is None:
+                self._enter(BACKUP)
             else:
-                self.clear_since = None
-                if now - self.state_since > self.get_parameter('turn_timeout_s').value:
-                    # A full sweep found nothing; the opening is not visible
-                    # from this spot, so change the spot.
-                    self._enter(BACKUP)
+                err = self._wrap(self.best_yaw - self.yaw)
+                if abs(err) <= self.get_parameter('commit_tolerance_rad').value:
+                    self._enter(DRIVE)
+                else:
+                    rate = self.get_parameter('turn_rate_rps').value
+                    cmd.angular.z = math.copysign(rate, err)
+                    if now - self.state_since > 8.0:
+                        self._enter(BACKUP)   # could not get there; move first
 
         elif self.state == BACKUP:
             cmd.linear.x = -self.get_parameter('backup_speed_mps').value

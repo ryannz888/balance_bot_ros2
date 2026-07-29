@@ -52,7 +52,10 @@ class AvoidanceGuard(Node):
         # against a 0.22 m track, so something 0.6 m off to one side at 2 m
         # blocked forward motion despite being nowhere near the path.  That is
         # what made the robot stop while still far from anything.
-        self.declare_parameter('corridor_half_width_m', 0.18)
+        # Must match the explorer's value, or the two disagree about what is
+        # in the way.  0.18 left only 70 mm clearance either side of the 220 mm
+        # track and the robot clipped edges; 0.22 gives 110 mm.
+        self.declare_parameter('corridor_half_width_m', 0.22)
         # A scan with fewer than this many usable bearings in the corridor is
         # not evidence of anything.
         self.declare_parameter('min_known_bearings', 4)
