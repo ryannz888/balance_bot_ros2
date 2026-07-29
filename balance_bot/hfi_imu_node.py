@@ -68,6 +68,12 @@ class HFIImuNode(Node):
         self.acceleration = [0.0, 0.0, 0.0]
         self.magnetometer = [0.0, 0.0, 0.0]
 
+        # Kept so the port can be reopened after a USB re-enumeration.
+        self.port = port
+        self.baud = baudrate
+        self.ser = None
+        self._last_open_attempt = 0.0
+
         try:
             self.ser = serial.Serial(port=port, baudrate=baudrate, timeout=0.5)
             # The CP2102-connected IMU starts streaming only after DTR/RTS are asserted.
@@ -76,8 +82,11 @@ class HFIImuNode(Node):
             time.sleep(2.0)
             self.get_logger().info(f'Opened {port} at {baudrate} baud')
         except Exception as e:
-            self.get_logger().error(f'Failed to open serial: {e}')
-            raise
+            # Not fatal any more: the device may simply not be up yet, and the
+            # read timer retries.  Dying here would mean a node that cannot
+            # survive being started a second too early.
+            self.get_logger().error(f'Failed to open serial: {e}; will retry')
+            self.ser = None
 
         self.timer = self.create_timer(0.002, self.read_serial)
 
@@ -169,6 +178,8 @@ class HFIImuNode(Node):
         self.mag_pub.publish(mag_msg)
 
     def read_serial(self):
+        if self.ser is None and not self._reopen():
+            return
         try:
             count = self.ser.in_waiting
             if count > 0:
@@ -176,7 +187,39 @@ class HFIImuNode(Node):
                 for byte in data:
                     self.handle_byte(byte)
         except Exception as e:
-            self.get_logger().error(f'Serial error: {e}')
+            # A USB serial device that re-enumerates leaves this node holding a
+            # dead file descriptor.  Reading it returns Errno 5 forever, and
+            # without reopening the node stays alive publishing nothing while
+            # the last orientation it managed to parse sits frozen on the
+            # topic.  Downstream that is worse than silence: the balance
+            # controller saw a constant pitch with zero rate, concluded the
+            # robot was standing still and upright, and engaged.  Observed
+            # after a boot where the adapter came back as ttyUSB1.
+            self.get_logger().error(f'Serial error: {e}; closing and retrying')
+            try:
+                self.ser.close()
+            except Exception:
+                pass
+            self.ser = None
+            self.key = 0            # drop any half-parsed frame
+
+    def _reopen(self):
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - self._last_open_attempt < 1.0:
+            return False
+        self._last_open_attempt = now
+        try:
+            # Reopen by the by-id path, which follows the device across
+            # re-enumeration; the ttyUSB number does not.
+            self.ser = serial.Serial(port=self.port, baudrate=self.baud, timeout=0.5)
+            self.ser.dtr = True
+            self.ser.rts = True
+            self.get_logger().info(f'reopened {self.port}')
+            return True
+        except Exception as e:
+            self.get_logger().warn(f'reopen failed: {e}')
+            self.ser = None
+            return False
 
 
 def main():

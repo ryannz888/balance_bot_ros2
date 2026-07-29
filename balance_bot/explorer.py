@@ -5,8 +5,8 @@ an obstacle guard that only stops is close to pointless -- the operator can see
 the obstacle perfectly well and stop sooner.  The guard earns its place by
 sitting under a command source that cannot see, which is what this node is.
 
-Publishes to /cmd_vel_raw, so avoidance_guard still limits forward motion
-underneath.  The split is deliberate: this node decides where to go and is
+Publishes to /cmd_vel_auto, which cmd_mux forwards to /cmd_vel_raw whenever no
+human is driving, and avoidance_guard limits underneath that.  The split is deliberate: this node decides where to go and is
 allowed to be wrong, while the guard decides what is survivable and is not.  A
 bug here should produce silly wandering, not a collision.
 
@@ -101,7 +101,7 @@ class Explorer(Node):
         self.have_scan = False
         self.last_logged = None
 
-        self.pub = self.create_publisher(Twist, '/cmd_vel_raw', 1)
+        self.pub = self.create_publisher(Twist, '/cmd_vel_auto', 1)
         self.state_pub = self.create_publisher(String, '/explorer/state', 5)
         self.create_subscription(LaserScan, '/obstacle/scan', self._scan_cb, 5)
         from sensor_msgs.msg import Imu

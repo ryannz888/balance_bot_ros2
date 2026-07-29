@@ -54,9 +54,9 @@ HFI-A9 IMU ──USB──► hfi_imu_node ──► /imu/data (~145 Hz)
                                          │
 Astra depth ──► openni2 ──► /depth/image ──► obstacle_scan ──► /obstacle/scan (LaserScan, 30 Hz)
                                                                     │
-explorer ──┐                                                        ▼
-           ├──► /cmd_vel_raw ──► avoidance_guard ──► /cmd_vel ──► balance_controller
-teleop ────┘                     (limits forward only)                 │
+explorer ──/cmd_vel_auto───┐                                        ▼
+                           ├─ cmd_mux ─► /cmd_vel_raw ─► avoidance_guard ─► /cmd_vel ─► balance_controller
+teleop ──/cmd_vel_manual───┘  (manual wins)   (limits forward only)     │
                                                                 /motor_cmd (PWM/100)
                                                                        ▼
                                     serial_bridge ──"M,<pwm>,<pwm>"──► Arduino ──► motors
@@ -95,6 +95,8 @@ Losing the link on a balancing robot means falling over, not stopping. Every sta
 | Deadman button | releasing stops the robot |
 | No attitude → no scan | `obstacle_scan` publishes nothing rather than a scan that reads clear |
 | No scan → no forward | the guard reports `STALE` and allows 0% forward |
+| Frozen IMU → disengage | 40 bit-identical pitch samples means a dead source, not a still robot |
+| Serial device lost | both serial nodes reopen through the by-id path rather than spinning on a dead handle |
 | Unknown ≠ clear | invalid depth pixels are absence of evidence, published as `NaN`, never as free space |
 
 That last one is the one that matters most and the one most easily got wrong — see
@@ -102,15 +104,23 @@ That last one is the one that matters most and the one most easily got wrong —
 
 ## Running it
 
+Installed as a systemd unit, the robot comes up on its own: power it on, set it
+upright, and it explores. Holding the gamepad's deadman button takes control;
+releasing it returns to exploring half a second later.
+
 ```bash
-# on the robot
-ros2 launch balance_bot balance.launch.py                    # stands and drives
-ros2 launch balance_bot balance.launch.py record:=true bag_name:=run1
-./run_camera.sh                                              # depth driver
-ros2 launch balance_bot avoid.launch.py                      # perception + guard
-ros2 launch balance_bot teleop_joy.launch.py cmd_topic:=/cmd_vel_raw
-ros2 launch balance_bot explore.launch.py                    # autonomous
-ros2 param set /explorer enabled true
+sudo systemctl enable --now balance-bot     # boot into autonomy
+journalctl -u balance-bot -f                # live
+ls -t ~/robot_logs/                         # per-boot logs and bags
+```
+
+By hand, in this order:
+
+```bash
+ros2 launch balance_bot balance.launch.py     # stands and drives
+./run_camera.sh                               # depth driver
+ros2 launch balance_bot autonomy.launch.py    # perception, guard, autonomy, gamepad
+ros2 launch balance_bot autonomy.launch.py explore:=false   # manual, still guarded
 ```
 
 Set the robot upright and let go; it engages itself. Analysis of a recorded run:

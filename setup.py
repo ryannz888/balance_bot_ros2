@@ -36,6 +36,7 @@ setup(
 		'obstacle_scan = balance_bot.obstacle_scan:main',
 		'avoidance_guard = balance_bot.avoidance_guard:main',
 		'explorer = balance_bot.explorer:main',
+		'cmd_mux = balance_bot.cmd_mux:main',
         ],
     },
 )

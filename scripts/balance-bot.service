@@ -1,0 +1,26 @@
+[Unit]
+Description=balance_bot: balance, perception, obstacle guard and autonomy
+# The USB serial devices and the camera enumerate after userspace starts, so
+# the script polls for them rather than relying on ordering here.
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=ryannz
+Group=ryannz
+# Needed to open /dev/bus/usb for the depth camera and the serial devices.
+SupplementaryGroups=dialout video plugdev
+WorkingDirectory=/home/ryannz/ros2_ws
+Environment=HOME=/home/ryannz
+# systemd does not read .bashrc; the script sources ROS itself.
+ExecStart=/home/ryannz/ros2_ws/start_robot.sh
+# Children are started with setsid and outlive the script, so stopping the unit
+# has to reach the whole group.
+KillMode=control-group
+TimeoutStopSec=20
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
