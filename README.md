@@ -42,8 +42,16 @@ The rest of the tuning was data-driven rather than trial and error:
   degraded at once and reverting the parameter did not restore them. That pattern is now a
   documented rule: stop tuning, inspect hardware.
 
-Full reasoning, including the negative results and the conclusions that were later overturned,
-is in [`docs/`](docs/).
+Perception and autonomy produced the same kind of findings. The robot stopped far from
+obstacles not because thresholds were timid but because the corridor was a wedge, which
+flares to eight times the robot's width at 3 m. It drove into a table leg it had tracked
+the whole way in, because the guard's speed taper and the explorer's turn threshold
+overlapped into a dead zone where neither reacted, at a commanded speed the drivetrain
+cannot even produce. And it engaged while not balanced because a frozen IMU reading
+presents as constant error with zero rate -- which is exactly the condition for engaging.
+
+Full reasoning, including the negative results and the conclusions that were later
+overturned, is in [`docs/`](docs/).
 
 ## Architecture
 
