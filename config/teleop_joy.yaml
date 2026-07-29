@@ -16,15 +16,21 @@
 # no matter what this file says.
 teleop_twist_joy_node:
   ros__parameters:
-    # SDL reports stick-up as -1.0, so the scale is negated to make pushing the
-    # stick forward a positive linear.x.
+    # Verified against the real pad on 2026-07-28 (X360 Controller over a 2.4G
+    # dongle, so SDL's standard layout applies).  Pushing the left stick forward
+    # reads axis 1 = +1.0, NOT -1.0: game_controller_node already negates SDL's
+    # stick-up-is-negative convention, so the scale must stay positive.  It was
+    # written negative here on the assumption it did not, which would have made
+    # forward drive the robot backwards.
     axis_linear:
       x: 1
     scale_linear:
-      x: -0.12
+      x: 0.12
     scale_linear_turbo:
-      x: -0.22
+      x: 0.22
 
+    # Right stick left reads axis 2 = +1.0, and REP-103 has positive angular.z
+    # as a left turn, so this one is positive as originally written.
     axis_angular:
       yaw: 2
     scale_angular:
@@ -35,5 +41,5 @@ teleop_twist_joy_node:
     # Releasing stops /cmd_vel, and the controller's cmd_timeout_s then ramps the
     # setpoint to zero, leaving the robot balancing in place.
     require_enable_button: true
-    enable_button: 9          # LB
-    enable_turbo_button: 10   # RB
+    enable_button: 9          # LB, confirmed on hardware
+    enable_turbo_button: 10   # RB, confirmed on hardware

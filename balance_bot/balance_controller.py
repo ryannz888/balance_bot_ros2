@@ -119,6 +119,16 @@ class BalanceController(Node):
         self.declare_parameter('stall_velocity_ticks', 30.0)
         self.declare_parameter('angular_cmd_sign', 1.0)  # 实测方向不对时置-1
         self.declare_parameter('state_publish_decim', 3)  # /balance/state降频倍数
+
+        # ---- 传感器健康 ----
+        # 真实IMU数据的末位总在抖。连续多帧pitch"逐位相同"不是姿态稳定，
+        # 是数据没在更新。控制器无法从数值本身分辨这两者：冻住的读数看起来
+        # 恰好就是"误差恒定、角速度为零"，也就是接管条件。实测串口
+        # 掉线后节点只刷Errno 5，姿态停在最后一帧。
+        self.declare_parameter('imu_freeze_frames', 40)
+        # 断流则另一回事：回调不触发，本节点整个停摆。用独立定时器兜底，
+        # 显式脱离并清零，而不是依赖serial_bridge的看门狗替我们收场。
+        self.declare_parameter('imu_timeout_s', 0.25)
         self.declare_parameter('pitch_rate_filter_alpha', 0.3)  # pitch_rate低通滤波系数(0~1)，越小越平滑但越滞后
         self.declare_parameter('pitch_rate_deadband_dps', 0.0)  # Ignore small IMU-rate noise around upright
         self.declare_parameter('debug_control', False)
@@ -161,6 +171,10 @@ class BalanceController(Node):
         self.turn_ref = 0.0
         self._ref_last_t = None
         self._station_keeping = True
+        self._frozen_count = 0
+        self._last_pitch_value = None
+        self._imu_wall_t = None
+        self._sensor_ok = True
         self._state_decim = 0
 
         motor_topic = self.get_parameter('motor_cmd_topic').value
@@ -171,6 +185,7 @@ class BalanceController(Node):
         self.create_subscription(Imu, '/imu/data', self._imu_cb, 10)
         self.create_subscription(String, '/wheel/encoders', self._enc_cb, 10)
         self.create_subscription(Twist, cmd_topic, self._cmd_cb, 1)
+        self.create_timer(0.05, self._sensor_watchdog)
         self.get_logger().info(
             f'balance_controller started (disengaged, 扶正后自动接管) '
             f'cmd_in={cmd_topic} motor_out={motor_topic} '
@@ -298,11 +313,58 @@ class BalanceController(Node):
         ]
         self.state_pub.publish(msg)
 
+    def _sensor_watchdog(self):
+        """Disengage explicitly when the IMU stops, rather than going quiet.
+
+        With no attitude this node simply stops running -- the callback drives
+        everything -- and the motors are saved only by serial_bridge's own
+        watchdog.  That works, but leaves this node believing it is still
+        engaged, so the next attitude sample to arrive, however stale, resumes
+        control from a state nobody checked.
+        """
+        if self._imu_wall_t is None:
+            return
+        now = self.get_clock().now().nanoseconds * 1e-9
+        if now - self._imu_wall_t > self.get_parameter('imu_timeout_s').value:
+            if self.engaged or self._sensor_ok:
+                self.get_logger().warn('no IMU data; disengaging')
+            self._sensor_ok = False
+            self.engaged = False
+            self.integral = 0.0
+            self.velocity_integral = 0.0
+            self._reset_command_refs()
+            self._send_pwm(0.0)
+
     def _imu_cb(self, msg: Imu):
+        self._imu_wall_t = self.get_clock().now().nanoseconds * 1e-9
         x, y, z, w = (msg.orientation.x, msg.orientation.y,
                       msg.orientation.z, msg.orientation.w)
         sinp = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
         pitch = math.degrees(math.asin(sinp))
+
+        # Bit-identical repeats mean the source stopped updating, not that the
+        # robot went still.  Noise guarantees a live sensor never does this.
+        if pitch == self._last_pitch_value:
+            self._frozen_count += 1
+        else:
+            self._frozen_count = 0
+            self._last_pitch_value = pitch
+        frozen_limit = int(self.get_parameter('imu_freeze_frames').value)
+        if frozen_limit > 0 and self._frozen_count >= frozen_limit:
+            if self.engaged or self._sensor_ok:
+                self.get_logger().warn(
+                    f'IMU pitch unchanged for {self._frozen_count} frames '
+                    f'({pitch:.2f} deg); treating as dead, disengaging')
+            self._sensor_ok = False
+            self.engaged = False
+            self.integral = 0.0
+            self.velocity_integral = 0.0
+            self._reset_command_refs()
+            self._send_pwm(0.0)
+            return
+        if not self._sensor_ok:
+            self.get_logger().info('IMU data live again')
+            self._sensor_ok = True
         t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
         if self.last_pitch is None or self.last_pitch_t is None:
             pitch_rate = 0.0

@@ -32,6 +32,11 @@ setup(
 		'serial_bridge = balance_bot.serial_bridge:main',
 		'hfi_imu_node = balance_bot.hfi_imu_node:main',
 		'balance_controller = balance_bot.balance_controller:main',
+		'level_frame_publisher = balance_bot.level_frame_publisher:main',
+		'obstacle_scan = balance_bot.obstacle_scan:main',
+		'avoidance_guard = balance_bot.avoidance_guard:main',
+		'explorer = balance_bot.explorer:main',
+		'cmd_mux = balance_bot.cmd_mux:main',
         ],
     },
 )

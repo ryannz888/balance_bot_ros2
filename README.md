@@ -1,116 +1,204 @@
 # balance_bot_ros2
 
-Two-wheeled self-balancing robot based on ROS2 Jazzy | Raspberry Pi 5 + Arduino + IMU + PID balance control
+Two-wheeled self-balancing robot. Raspberry Pi 5 + Arduino Mega + IMU + depth camera, ROS 2 Jazzy.
 
-**MVP0 demo:** keyboard teleop with encoder-driven live RViz visualization → [videos/mvp0_teleop_rviz_demo.mp4](videos/mvp0_teleop_rviz_demo.mp4)
+Stands on its own indefinitely, drives under gamepad or keyboard control while balancing,
+stops itself when the depth camera sees something in the way, and will drive around
+a room on its own, turning away from whatever it finds.
 
-## Hardware
+| | measured |
+| --- | --- |
+| Continuous balance | **361 s** in one unbroken segment, still upright when recording stopped |
+| Driving | **755 s** of gamepad driving with zero falls |
+| Pitch error, station keeping | **0.34 deg RMS**, inside ±1.3 deg |
+| Braking distance | **0.10 m** from 0.174 m/s |
+| Obstacle scan | 1.98 m baseline with 0.01 m scatter; detects at 0.53–0.71 m |
+| Autonomous | **486.9 s** of unbroken balance while driving, turning and reversing on its own |
 
-| Component | Role |
-| --------- | ---- |
-| Two-wheeled self-balancing base (with encoders) | Mobile platform |
-| Arduino Mega 2560 | Motor driver (TB6612) + encoder ISR + serial protocol |
-| Raspberry Pi 5 (Ubuntu, ROS2 Jazzy) | ROS2 main compute |
-| HFI-A9 IMU | Orientation via USB serial, custom driver, ~285Hz |
-| Orbbec Astra depth camera | Obstacle detection (MVP2) |
+## What was actually hard
 
-## System Architecture
+A balancing robot is open-loop unstable and **non-minimum phase**: to slow a forward roll the
+wheels must first drive *forward*, so the base moves ahead of the centre of mass and the body
+pitches back. Get that backwards and the outer loop becomes positive feedback.
+
+That is exactly what happened. `kp_v` was positive for three days and the robot could not hold
+more than 8 seconds. The fix came from deriving the sign twice — once from the physical
+transient, once from the characteristic equation `s² − K'·kp_v·s − K'·ki_v = 0`, which requires
+both gains negative for stability. Setting `kp_v = −0.005` took the longest run from **7.8 s to
+367 s in a single step**.
+
+The rest of the tuning was data-driven rather than trial and error:
+
+- **Damping vs stiffness.** A slow 0.45 Hz surge looked like too little damping. Estimating
+  ζ ≈ 1.31 from the observed period showed the loop was already overdamped, so the answer was
+  more position stiffness, not more damping.
+- **The balance point was measured, not guessed.** While balancing with zero mean wheel speed,
+  the mean pitch *is* the mechanical balance point: 7.53°. Judged by the velocity integral
+  collapsing from −322 to −49 and no longer clamping.
+- **Judder was identified as loop self-excitation, not mechanical resonance** — the oscillation
+  frequency moved from 9.18 Hz to 7.07 Hz when a software filter coefficient changed, which a
+  structural resonance cannot do. Lowering `kd` removed it at no cost to station keeping.
+- **A regression was traced to a loose fastener, not to parameters.** Several unrelated metrics
+  degraded at once and reverting the parameter did not restore them. That pattern is now a
+  documented rule: stop tuning, inspect hardware.
+
+Perception and autonomy produced the same kind of findings. The robot stopped far from
+obstacles not because thresholds were timid but because the corridor was a wedge, which
+flares to eight times the robot's width at 3 m. It drove into a table leg it had tracked
+the whole way in, because the guard's speed taper and the explorer's turn threshold
+overlapped into a dead zone where neither reacted, at a commanded speed the drivetrain
+cannot even produce. And it engaged while not balanced because a frozen IMU reading
+presents as constant error with zero rate -- which is exactly the condition for engaging.
+
+Full reasoning, including the negative results and the conclusions that were later
+overturned, is in [`docs/`](docs/).
+
+## Architecture
 
 ```text
-HFI-A9 IMU ──USB──► hfi_imu_node ──► /imu/data (sensor_msgs/Imu, ~145Hz)
-                                          │
-teleop ──/cmd_vel──► balance_controller ◄─┘
-       (SI units,           │  └──► /balance/state (controller's own view, 48Hz)
-        human intent)       │
-                    /motor_cmd (PWM/100)
-                            ▼
-                      serial_bridge ──"M,<pwm>,<pwm>"──► Arduino Mega ──► TB6612 ──► motors
-                            ▲                                  │
-                            └────"E,<left>,<right>" (100Hz)────┘  encoder counts
-                            │
-                            ├──► /wheel/encoders (raw counts, left/right normalized)
-                            └──► /joint_states (wheel angles, 20Hz) ──► robot_state_publisher ──► /tf
-
-URDF (SolidWorks-exported meshes + hand-written sensor frames) ──► /robot_description
+HFI-A9 IMU ──USB──► hfi_imu_node ──► /imu/data (~145 Hz)
+                                         │
+                                    level_frame_publisher ──► base_link_level (gravity-aligned)
+                                         │
+Astra depth ──► openni2 ──► /depth/image ──► obstacle_scan ──► /obstacle/scan (LaserScan, 30 Hz)
+                                                                    │
+explorer ──/cmd_vel_auto───┐                                        ▼
+                           ├─ cmd_mux ─► /cmd_vel_raw ─► avoidance_guard ─► /cmd_vel ─► balance_controller
+teleop ──/cmd_vel_manual───┘  (manual wins)   (limits forward only)     │
+                                                                /motor_cmd (PWM/100)
+                                                                       ▼
+                                    serial_bridge ──"M,<pwm>,<pwm>"──► Arduino ──► motors
+                                          ▲                               │
+                                          └───"E,<left>,<right>" 100 Hz───┘
 ```
 
-`/cmd_vel` carries **velocity intent in SI units**; `/motor_cmd` carries the PWM
-setpoint.  Splitting them is what lets teleop and the balance controller coexist —
-before, both wrote `/cmd_vel` and overwrote each other.  `bringup.launch.py` still
-defaults `serial_bridge` to `/cmd_vel`, so MVP0 keyboard-direct driving is unchanged.
+Each boundary in that chain exists for a reason found by breaking it:
 
-Driving adds no new control loop: the velocity and yaw loops already regulate wheel
-speed and left/right difference to **zero**, so teleop just moves those setpoints.
+- **`/cmd_vel` vs `/motor_cmd`.** Both teleop and the controller once wrote `/cmd_vel` and
+  overwrote each other, so driving while balancing was impossible. `/cmd_vel` is now human
+  intent in SI units; `/motor_cmd` is the PWM setpoint.
+- **`/cmd_vel_raw` vs `/cmd_vel`.** The guard owns `/cmd_vel`; command sources publish
+  `/cmd_vel_raw`. The topic name *is* the enforcement — a source that writes `/cmd_vel`
+  directly bypasses the guard.
+- **`base_link_level`.** The TF tree roots at `base_link`, so everything downstream implicitly
+  treats the body as level. It never is. At 1 m, four degrees of tilt is 7 cm of apparent
+  height — the whole difference between floor and obstacle.
+- **The corridor is a strip, not a wedge.** It was a fixed half-angle, which flares with
+  distance: ±0.30 rad spans 1.86 m at 3 m against a 0.22 m track, so distant objects well
+  off to the side read as blocking. That, not conservative thresholds, was why the robot
+  stopped while still far from anything.
 
-Frame convention: REP-103 (X forward, Y left, Z up). `base_link` origin at wheel-axle midpoint.
-Tilt convention for balance control: **forward tilt = positive pitch**.
+Driving needed **no new control loop**. The velocity and yaw loops already regulate wheel speed
+and left/right difference to zero; teleop only moves those setpoints off zero.
 
-## Current Status
+## Failing safe
 
-- [x] Week 1: HFI-A9 IMU driver written from scratch (protocol reverse-engineered), `/imu/data` publishing
-- [x] Week 2: Dual motor + encoder verified, `E,`/`M,` serial protocol working
-- [x] Week 3: `serial_bridge` node — `/cmd_vel` → PWM downlink, encoder uplink
-- [x] Week 4: URDF (SW2URDF export + fixes), RViz visualization, TF tree with sensor frames
-- [x] **MVP0 (2026-07-19): keyboard teleop + encoder-driven RViz live sync** ✅
-- [x] **MVP1a (2026-07-25): balance PID — four-stage cascade, 228s continuous** ✅
-- [x] **MVP1b (2026-07-27): driving under balance + integrated rosbag recording** ✅
-      — 361s continuous balance, drive/reverse/yaw commands tracked, one-command capture
-- [ ] MVP2: Depth-camera obstacle avoidance + state machine (stretch goal)
+Losing the link on a balancing robot means falling over, not stopping. Every stage fails closed:
+
+| | |
+| --- | --- |
+| Command timeout | setpoint ramps to zero, robot keeps balancing in place |
+| Setpoint slew limit | a step command would demand an instant lean the body cannot produce |
+| Input clamp | `teleop_twist_keyboard` defaults to 0.5 m/s, past what this machine can hold |
+| Deadman button | releasing stops the robot |
+| No attitude → no scan | `obstacle_scan` publishes nothing rather than a scan that reads clear |
+| No scan → no forward | the guard reports `STALE` and allows 0% forward |
+| Frozen IMU → disengage | 40 bit-identical pitch samples means a dead source, not a still robot |
+| Serial device lost | both serial nodes reopen through the by-id path rather than spinning on a dead handle |
+| Unknown ≠ clear | invalid depth pixels are absence of evidence, published as `NaN`, never as free space |
+
+That last one is the one that matters most and the one most easily got wrong — see
+[`docs/08`](docs/08_MVP2深度相机接入_2026-07-28.md) for how it was got wrong here first.
 
 ## Running it
 
+Installed as a systemd unit, the robot comes up on its own: power it on, set it
+upright, and it explores. Holding the gamepad's deadman button takes control;
+releasing it returns to exploring half a second later.
+
 ```bash
-ros2 launch balance_bot balance.launch.py                          # balance only
-ros2 launch balance_bot balance.launch.py record:=true bag_name:=run1   # + rosbag
-ros2 run teleop_twist_keyboard teleop_twist_keyboard               # drive it
-ros2 launch balance_bot teleop_joy.launch.py                       # or a gamepad
+sudo systemctl enable --now balance-bot     # boot into autonomy
+journalctl -u balance-bot -f                # live
+ls -t ~/robot_logs/                         # per-boot logs and bags
 ```
 
-Set the robot upright and let go; it engages itself.  Analysis of a recorded run:
+By hand, in this order:
+
+```bash
+ros2 launch balance_bot balance.launch.py     # stands and drives
+./run_camera.sh                               # depth driver
+ros2 launch balance_bot autonomy.launch.py    # perception, guard, autonomy, gamepad
+ros2 launch balance_bot autonomy.launch.py explore:=false   # manual, still guarded
+```
+
+Set the robot upright and let go; it engages itself. Analysis of a recorded run:
 
 ```bash
 scp -r pi:~/ros2_ws/bags/run1_<stamp> results/rosbag/
 python tools/analyze_teleop.py results/rosbag/run1_<stamp>
 ```
 
-## Quick Start (on the robot)
+## Hardware
 
-```bash
-cd ~/ros2_ws && colcon build --packages-select balance_bot balance_bot_description
-source install/setup.bash
-ros2 launch balance_bot bringup.launch.py     # IMU + serial bridge + robot_state_publisher
+| Component | Role |
+| --------- | ---- |
+| Two-wheeled base with encoders | 277.5 counts/rev, 65 mm wheels, 220 mm track |
+| Arduino Mega 2560 | TB6612 motor driver, encoder ISR, serial protocol, command watchdog |
+| Raspberry Pi 5 (Ubuntu 24.04, ROS 2 Jazzy) | control, perception, logging |
+| HFI-A9 IMU | fused quaternion over USB serial, driver written from the protocol |
+| Orbbec Astra depth camera | 640×480 depth at 24 Hz, discontinued — see below |
 
-# In a second terminal: keyboard teleop
-ros2 run teleop_twist_keyboard teleop_twist_keyboard
+The Astra is discontinued and its official OpenNI2 repository is gone. The current Orbbec SDK
+does not recognise it, and Debian's `libopenni2` ships only the PrimeSense driver. Depth works
+here by taking the prebuilt `liborbbec.so` out of `orbbec/ros2_astra_camera`, installing it as
+`liborbbec.so.0` because Debian's loader only scans for versioned names, and running the camera
+node against Orbbec's own `libOpenNI2` — Debian's enumerates the device but segfaults on stream.
 
-# On a remote machine (CycloneDDS static-peer config): live model view
-rviz2    # Fixed Frame: base_link, add RobotModel on /robot_description
-```
+## Tooling
 
-URDF-only preview (no hardware):
+Everything under [`tools/`](tools/) exists because something needed measuring:
 
-```bash
-ros2 launch balance_bot_description display.launch.py
-```
+| | |
+| --- | --- |
+| `analyze_teleop.py` | scores a run from the bag, using the controller's own recorded state |
+| `analyze_run.py` | replays the controller state machine offline, for bags without it |
+| `teleop_sequence.py` | scripted command sequences, repeatable across runs |
+| `check_level_frame.py` | verifies the gravity frame by rotating measured gravity through it |
+| `depth_geometry.py` | checks a depth frame's 3-D geometry for self-consistency |
+| `loadtest_camera.sh` | measures whether streaming depth costs the control loops anything |
+| `joymap.py` | maps a gamepad's real axis and button indices in one pass |
 
-## Engineering Notes (hard-won)
+Braking distance was never measured deliberately — it was computed from bags recorded days
+earlier for tuning, because every teleop command is followed by a release.
 
-- Serial devices are opened via `/dev/serial/by-id/` stable paths — `ttyACM*` numbering drifts across boots
-- The left/right harness (motors **and** encoders) was found cross-wired at assembly; mapping is
-  normalized in `serial_bridge` against the URDF convention, verified wheel-by-wheel
-- `/joint_states` is decimated to 20Hz — 100Hz TF over Wi-Fi saturates the link and causes replay lag
-- Cross-machine DDS uses CycloneDDS with explicit peer IPs (multicast unreliable on hotspot networks)
-- Full incident logs: [docs/](docs/)
+## Status
 
-## Project Structure
+- [x] Week 1–4: IMU driver, motor and encoder verification, serial bridge, URDF and TF
+- [x] **MVP0** — keyboard teleop with encoder-driven live RViz
+- [x] **MVP1** — balance PID (four-stage cascade), driving under balance, gamepad, recording and analysis
+- [x] **MVP2** — depth perception, gravity-aligned obstacle scan, avoidance guard, autonomous wandering
+- [ ] Odometry (encoders on a pitching body do not measure ground distance directly), then SLAM
 
-```text
-balance_bot_ros2/           # ROS2 package: balance_bot (python)
-  balance_bot/              #   hfi_imu_node / serial_bridge / imu_reader (debug)
-  launch/bringup.launch.py  #   one-command bringup
-  arduino/firmware/         # Arduino Mega firmware (step1-4)
-  src/balance_bot_description/  # URDF (mesh + primitive), meshes, display launch
-  docs/                     # Issue/fix logs per milestone
-  results/                  # Screenshots, TF tree, rosbags
-  videos/                   # Demo recordings
-```
+Autonomy steers for gaps rather than stopping at obstacles: every bearing is tested for
+whether the robot would fit through it, and the widest gap wide enough is steered toward
+while still driving. A 0.4 m opening is taken, a 0.2 m one is refused.
+
+Its limit is the sensor, not the logic. With a 58° horizontal field of view the robot
+cannot see where it is about to turn until it has turned, so escaping an enclosed space
+is search rather than planning. A wider sensor, or remembering what was seen a moment
+ago, is the next real improvement.
+
+Known open items are recorded with reproduction steps rather than omitted — the most
+significant is that driving forward can lock up below the static-friction threshold, and why
+one attempt to fix it made things worse. See [`docs/07`](docs/07_遥控与录制_2026-07-26.md) §11.
+
+## Engineering notes
+
+- Serial devices open via `/dev/serial/by-id/` — `ttyACM*` numbering drifts across boots
+- The left/right harness (motors **and** encoders) was cross-wired at assembly; normalised in
+  `serial_bridge` and verified wheel by wheel
+- `/joint_states` is decimated to 20 Hz; 100 Hz TF saturates a hotspot link
+- The camera driver stamps from its own clock by default, which drifted 17 s and silently broke
+  attitude pairing — `use_device_time:=false`
+- Depth is never streamed off-board: 640×480 float32 at 24 Hz is ~29 MB/s. The robot computes
+  and publishes a 64-range scan instead

@@ -28,9 +28,9 @@ class SerialBridge(Node):
         self.enc_pub = self.create_publisher(String, '/wheel/encoders', 10)
         self.joint_pub = self.create_publisher(JointState, '/joint_states', 10)
         # by-id稳定路径：不受USB枚举顺序影响（ttyACM0/1漂移曾导致读到错误设备）
-        self.ser = serial.Serial(
-            port='/dev/serial/by-id/usb-Arduino_Srl_Arduino_Mega_85431303636351613122-if00',
-            baudrate=115200, timeout=1.0)
+        self.port = ('/dev/serial/by-id/'
+                     'usb-Arduino_Srl_Arduino_Mega_85431303636351613122-if00')
+        self.ser = serial.Serial(port=self.port, baudrate=115200, timeout=1.0)
         # The Mega's USB serial interface needs DTR/RTS asserted after reconnect.
         self.ser.dtr = True
         self.ser.rts = True
@@ -55,11 +55,39 @@ class SerialBridge(Node):
         self.last_cmd_t = time.monotonic()
 
     def _send_motor(self, left_pwm, right_pwm):
+        if self.ser is None:
+            return
         cmd = f'M,{-right_pwm},{left_pwm}\n'
-        self.ser.write(cmd.encode())
+        try:
+            self.ser.write(cmd.encode())
+        except Exception as e:
+            self.get_logger().error(f'write failed: {e}')
+            self._drop()
 
     def _send_stop(self):
-        self.ser.write(b'M,0,0\n')
+        if self.ser is None:
+            return
+        try:
+            self.ser.write(b'M,0,0\n')
+        except Exception:
+            self._drop()
+
+    def _drop(self):
+        """Let go of a dead handle so the reader can reopen the device.
+
+        A USB serial adapter that re-enumerates leaves this node writing to a
+        closed descriptor.  The Arduino stops receiving commands and its own
+        watchdog zeroes the motors, which is the right outcome, but the node
+        never recovers on its own and the robot stays dead until someone
+        restarts it.  Seen on the IMU's adapter, which came back as ttyUSB1
+        after a reboot while the node still held ttyUSB0.
+        """
+        try:
+            if self.ser is not None:
+                self.ser.close()
+        except Exception:
+            pass
+        self.ser = None
 
     def _watchdog_cb(self):
         # A stale command must never leave the Arduino driving the last PWM.
@@ -75,7 +103,23 @@ class SerialBridge(Node):
 
     def _read_serial(self):
         while True:
-            line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            if self.ser is None:
+                time.sleep(1.0)
+                try:
+                    self.ser = serial.Serial(port=self.port, baudrate=115200,
+                                             timeout=1.0)
+                    self.ser.dtr = True
+                    self.ser.rts = True
+                    time.sleep(2.0)
+                    self.get_logger().info(f'reopened {self.port}')
+                except Exception:
+                    continue
+            try:
+                line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            except Exception as e:
+                self.get_logger().error(f'read failed: {e}')
+                self._drop()
+                continue
             if not line.startswith('E,'):
                 continue
             parts = line.split(',')
