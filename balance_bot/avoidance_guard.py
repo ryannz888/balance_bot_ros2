@@ -37,15 +37,22 @@ CLEAR, SLOW, STOP, BLIND, STALE = 'CLEAR', 'SLOW', 'STOP', 'BLIND', 'STALE'
 class AvoidanceGuard(Node):
     def __init__(self):
         super().__init__('avoidance_guard')
-        self.declare_parameter('stop_distance_m', 0.70)
-        self.declare_parameter('slow_distance_m', 1.50)
+        # 0.60 sits just above the sensor floor: the Astra's nearest valid
+        # returns measure 0.67 m, so deciding any later means deciding blind.
+        # Braking needs 0.10 m, so the margin is in the sensor, not the brakes.
+        self.declare_parameter('stop_distance_m', 0.60)
+        self.declare_parameter('slow_distance_m', 1.20)
         # Hysteresis: how far things must be, and for how long, before forward
         # motion is allowed again after a stop.
-        self.declare_parameter('release_distance_m', 0.95)
+        self.declare_parameter('release_distance_m', 0.80)
         self.declare_parameter('release_hold_s', 0.6)
-        # Only bearings within this half-angle can block forward motion; the
-        # scan is wider than the robot and a wall to the side is not in the way.
-        self.declare_parameter('corridor_half_angle_rad', 0.30)
+        # The corridor is the strip the robot physically occupies, not a wedge.
+        # It was a fixed half-angle, which is wrong in a way that gets worse
+        # with distance: +-0.30 rad spans 0.62 m at 1 m and 1.86 m at 3 m
+        # against a 0.22 m track, so something 0.6 m off to one side at 2 m
+        # blocked forward motion despite being nowhere near the path.  That is
+        # what made the robot stop while still far from anything.
+        self.declare_parameter('corridor_half_width_m', 0.18)
         # A scan with fewer than this many usable bearings in the corridor is
         # not evidence of anything.
         self.declare_parameter('min_known_bearings', 4)
@@ -73,19 +80,25 @@ class AvoidanceGuard(Node):
 
     def _scan_cb(self, msg: LaserScan):
         self.scan_t = self._now()
-        half = self.get_parameter('corridor_half_angle_rad').value
+        halfw = self.get_parameter('corridor_half_width_m').value
 
         nearest = float('inf')
         known = 0
         for i, r in enumerate(msg.ranges):
             ang = msg.angle_min + i * msg.angle_increment
-            if abs(ang) > half:
-                continue
             if r != r:              # NaN: no evidence for this bearing
                 continue
+            if math.isinf(r):
+                known += 1          # seen, and clear
+                continue
+            # Where the return actually sits, rather than which way it lies.
+            lateral = r * math.sin(ang)
+            forward = r * math.cos(ang)
+            if abs(lateral) > halfw or forward <= 0.0:
+                continue            # beside the robot, not in front of it
             known += 1
-            if r < nearest:
-                nearest = r
+            if forward < nearest:
+                nearest = forward   # distance along the path, not slant range
         self.nearest = nearest
 
         if known < self.get_parameter('min_known_bearings').value:

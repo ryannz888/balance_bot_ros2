@@ -75,6 +75,10 @@ Each boundary in that chain exists for a reason found by breaking it:
 - **`base_link_level`.** The TF tree roots at `base_link`, so everything downstream implicitly
   treats the body as level. It never is. At 1 m, four degrees of tilt is 7 cm of apparent
   height — the whole difference between floor and obstacle.
+- **The corridor is a strip, not a wedge.** It was a fixed half-angle, which flares with
+  distance: ±0.30 rad spans 1.86 m at 3 m against a 0.22 m track, so distant objects well
+  off to the side read as blocking. That, not conservative thresholds, was why the robot
+  stopped while still far from anything.
 
 Driving needed **no new control loop**. The velocity and yaw loops already regulate wheel speed
 and left/right difference to zero; teleop only moves those setpoints off zero.
@@ -157,10 +161,14 @@ earlier for tuning, because every teleop command is followed by a release.
 - [x] **MVP2** — depth perception, gravity-aligned obstacle scan, avoidance guard, autonomous wandering
 - [ ] Odometry (encoders on a pitching body do not measure ground distance directly), then SLAM
 
-Autonomy's limit is the sensor, not the logic: with a 58° horizontal field of view the
-robot cannot see where it is about to turn until it has turned, so escaping an enclosed
-space is search rather than planning. A wider sensor, or remembering what was seen a
-moment ago, is the next real improvement.
+Autonomy steers for gaps rather than stopping at obstacles: every bearing is tested for
+whether the robot would fit through it, and the widest gap wide enough is steered toward
+while still driving. A 0.4 m opening is taken, a 0.2 m one is refused.
+
+Its limit is the sensor, not the logic. With a 58° horizontal field of view the robot
+cannot see where it is about to turn until it has turned, so escaping an enclosed space
+is search rather than planning. A wider sensor, or remembering what was seen a moment
+ago, is the next real improvement.
 
 Known open items are recorded with reproduction steps rather than omitted — the most
 significant is that driving forward can lock up below the static-friction threshold, and why

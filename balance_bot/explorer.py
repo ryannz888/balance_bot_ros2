@@ -10,10 +10,17 @@ underneath.  The split is deliberate: this node decides where to go and is
 allowed to be wrong, while the guard decides what is survivable and is not.  A
 bug here should produce silly wandering, not a collision.
 
-Turn direction is taken from the scan rather than fixed.  Always turning the
-same way walks a robot into a corner and keeps it there, because the corner is
-symmetric and the rule is not.  Comparing clearance either side and turning
-toward the open one breaks that symmetry with evidence.
+Steering follows the widest gap rather than treating the world as blocked or
+clear.  The first version turned whenever anything entered a fixed corridor,
+which stopped the robot dead in front of a doorway it could have driven
+straight through.  Now every bearing is tested for whether the robot would
+actually fit through it, contiguous passable bearings are grouped, and the
+widest group wide enough for the robot is steered toward.  A gap only has to be
+robot-width plus clearance to be worth taking.
+
+Turn direction, when no gap exists at all, still comes from the scan rather than
+being fixed.  Always turning the same way walks a robot into a corner and keeps
+it there, because the corner is symmetric and the rule is not.
 
 Disabled by default.  Something that drives itself should not start driving
 because a launch file ran.
@@ -37,15 +44,23 @@ class Explorer(Node):
         self.declare_parameter('turn_rate_rps', 0.6)
         self.declare_parameter('backup_speed_mps', 0.08)
 
-        # Turn earlier than the guard stops, so the robot steers around things
-        # instead of nosing up to them and halting.  The guard stops at 0.70 m.
-        self.declare_parameter('turn_trigger_m', 1.10)
-        self.declare_parameter('resume_clear_m', 1.60)
-        self.declare_parameter('resume_hold_s', 0.4)
+        # Turn later than before.  1.10 m had the robot stopping while still
+        # far from anything, because the old corridor flared with distance.
+        self.declare_parameter('turn_trigger_m', 0.85)
+        self.declare_parameter('resume_clear_m', 1.10)
+        self.declare_parameter('resume_hold_s', 0.3)
 
-        # Corridor the robot actually occupies, for deciding whether to turn.
-        self.declare_parameter('corridor_half_angle_rad', 0.30)
+        # The strip the robot occupies, in metres.  Not an angle: an angular
+        # corridor is 0.62 m wide at 1 m and 1.86 m at 3 m against a 0.22 m
+        # track, so distant things well off to the side read as obstacles.
+        self.declare_parameter('corridor_half_width_m', 0.18)
         self.declare_parameter('min_known_bearings', 4)
+
+        # A gap must fit the robot with clearance to be worth aiming at.
+        self.declare_parameter('gap_min_width_m', 0.36)
+        self.declare_parameter('gap_lookahead_m', 1.20)
+        # How hard to steer toward the chosen gap while still moving.
+        self.declare_parameter('gap_steer_gain', 1.2)
 
         # Turning forever means the way out is not visible from here.
         self.declare_parameter('turn_timeout_s', 6.0)
@@ -57,6 +72,8 @@ class Explorer(Node):
         self.turn_sign = 1.0
         self.nearest = float('nan')
         self.left_clear = self.right_clear = float('nan')
+        self.gap_bearing = None
+        self.gap_width = 0.0
         self.have_scan = False
         self.last_logged = None
 
@@ -72,21 +89,39 @@ class Explorer(Node):
         return self.get_clock().now().nanoseconds * 1e-9
 
     def _scan_cb(self, msg: LaserScan):
-        half = self.get_parameter('corridor_half_angle_rad').value
+        halfw = self.get_parameter('corridor_half_width_m').value
+        look = self.get_parameter('gap_lookahead_m').value
+        need = self.get_parameter('gap_min_width_m').value
+
         nearest = float('inf')
         known = 0
         left_min = right_min = float('inf')
         left_n = right_n = 0
+        passable = []          # (bearing, passable?) for gap grouping
+
         for i, r in enumerate(msg.ranges):
             ang = msg.angle_min + i * msg.angle_increment
-            if r != r:                       # unknown bearing, no evidence
+            if r != r:                       # unknown: no evidence either way
+                passable.append((ang, False))
                 continue
-            if abs(ang) <= half:
+            if math.isinf(r):
                 known += 1
-                nearest = min(nearest, r)
-            # Side clearance uses the whole scan, not just the corridor: the
-            # question is which way is open, and that is answered off to the
-            # sides.
+                passable.append((ang, True))
+                if ang > 0.0:
+                    left_n += 1
+                elif ang < 0.0:
+                    right_n += 1
+                continue
+
+            lateral = r * math.sin(ang)
+            forward = r * math.cos(ang)
+            # In the strip the robot occupies, measured across, not as an angle.
+            if abs(lateral) <= halfw and forward > 0.0:
+                known += 1
+                nearest = min(nearest, forward)
+            # A bearing is passable if driving that way stays clear far enough
+            # to be worth committing to.
+            passable.append((ang, r >= look))
             if ang > 0.0:
                 left_min = min(left_min, r)
                 left_n += 1
@@ -98,6 +133,30 @@ class Explorer(Node):
         self.nearest = nearest
         self.left_clear = left_min if left_n else float('nan')
         self.right_clear = right_min if right_n else float('nan')
+        self.gap_bearing, self.gap_width = self._widest_gap(passable, look, need)
+
+    @staticmethod
+    def _widest_gap(passable, look, need):
+        """Widest run of passable bearings the robot would fit through.
+
+        Width is measured in metres at the lookahead distance rather than in
+        bearings, because a run of bearings is a different physical size
+        depending on how far away it is.  A doorway that is plainly wide enough
+        at 1 m occupies few enough bearings at 3 m to look like noise.
+        """
+        best_mid, best_w = None, 0.0
+        start = None
+        for i, (ang, ok) in enumerate(passable + [(0.0, False)]):
+            if ok and start is None:
+                start = i
+            elif not ok and start is not None:
+                a0 = passable[start][0]
+                a1 = passable[i - 1][0]
+                width = 2.0 * look * math.sin(max(0.0, (a1 - a0)) / 2.0)
+                if width > best_w:
+                    best_w, best_mid = width, 0.5 * (a0 + a1)
+                start = None
+        return (best_mid, best_w) if best_w >= need else (None, best_w)
 
     def _enter(self, state):
         if state != self.state:
@@ -131,18 +190,28 @@ class Explorer(Node):
 
         if self.state == DRIVE:
             if self.nearest < trigger:
-                # Turn toward whichever side has more room.  NaN means that
-                # side is unknown, which is not a reason to prefer it.
                 lc = self.left_clear if self.left_clear == self.left_clear else -1.0
                 rc = self.right_clear if self.right_clear == self.right_clear else -1.0
                 self.turn_sign = 1.0 if lc >= rc else -1.0
                 self._enter(TURN)
             else:
                 cmd.linear.x = self.get_parameter('cruise_speed_mps').value
+                # Steer toward the widest gap while still driving, instead of
+                # waiting until something blocks and only then reacting.  This
+                # is what lets it aim at a doorway rather than stop in front of
+                # the wall beside it.
+                if self.gap_bearing is not None:
+                    gain = self.get_parameter('gap_steer_gain').value
+                    rate = self.get_parameter('turn_rate_rps').value
+                    cmd.angular.z = max(-rate, min(rate, gain * self.gap_bearing))
 
         elif self.state == TURN:
+            # If a gap has come into view, turn toward it rather than
+            # continuing to sweep blindly in the chosen direction.
+            if self.gap_bearing is not None:
+                self.turn_sign = 1.0 if self.gap_bearing > 0.0 else -1.0
             cmd.angular.z = self.turn_sign * self.get_parameter('turn_rate_rps').value
-            if self.nearest >= resume:
+            if self.nearest >= resume or self.gap_bearing is not None:
                 if self.clear_since is None:
                     self.clear_since = now
                 elif now - self.clear_since >= hold:
@@ -167,7 +236,9 @@ class Explorer(Node):
         near = f'{self.nearest:.2f}' if math.isfinite(self.nearest) else '--'
         lc = f'{self.left_clear:.2f}' if math.isfinite(self.left_clear) else '--'
         rc = f'{self.right_clear:.2f}' if math.isfinite(self.right_clear) else '--'
-        text = f'{label} near={near} L={lc} R={rc}'
+        gap = (f'{math.degrees(self.gap_bearing):+.0f}deg/{self.gap_width:.2f}m'
+               if self.gap_bearing is not None else 'none')
+        text = f'{label} near={near} L={lc} R={rc} gap={gap}'
         if label != self.last_logged:
             self.last_logged = label
             self.get_logger().info(text)
